@@ -571,18 +571,20 @@ const currentSettings: SettingsSnapshot = {
 
 const load_settings = () => {
 	for (const [key, value] of Object.entries(currentSettings)) {
-		const persisted = localStorage[key]
+		if (localStorage.hasOwnProperty(key)) {
+			const persisted = localStorage[key]
 
-		switch (typeof value) {
-			case 'string':
-				currentSettings[key] = persisted
-				break
-			case 'number':
-				currentSettings[key] = parseInt(persisted, 10)
-				break
-			case 'boolean':
-				currentSettings[key] = persisted === 'true'
-				break
+			switch (typeof value) {
+				case 'string':
+					currentSettings[key] = persisted
+					break
+				case 'number':
+					currentSettings[key] = parseInt(persisted, 10)
+					break
+				case 'boolean':
+					currentSettings[key] = persisted === 'true'
+					break
+			}
 		}
 	}
 }
