@@ -605,6 +605,10 @@ function onLoaded() {
 	const src = document.getElementById('src') as HTMLCanvasElement
 	const dest = document.getElementById('dest') as HTMLCanvasElement
 
+	const start = document.getElementById('start') as HTMLButtonElement
+	const stop = document.getElementById('stop') as HTMLButtonElement
+	const feedback = document.getElementById('feedback') as HTMLButtonElement
+
 	src.addEventListener('click', () => {
 		if (src.style.height === 'auto') {
 			src.style.width = `auto`
@@ -644,11 +648,12 @@ function onLoaded() {
 				// dest.style.width = 'auto'
 				// dest.style.height = 'auto'
 
-				;(document.getElementById('start') as HTMLButtonElement).disabled = false
+				start.disabled = false
 			})
 		})
 
-		;(document.getElementById('start') as HTMLButtonElement).disabled = true
+		start.disabled = true
+		feedback.disabled = true
 		reader.readAsDataURL(file)
 	}
 
@@ -699,7 +704,7 @@ function onLoaded() {
 		filePicker.dispatchEvent(new Event('change'))
 	})
 
-	async function start(file) {
+	async function process(file) {
 		if (onnx_runner.running) {
 			console.log('Already running')
 			return
@@ -744,6 +749,7 @@ function onLoaded() {
 
 		dest.style.width = 'auto'
 		dest.style.height = 'auto'
+		feedback.disabled = true
 
 		const tile_size = config.calc_tile_size(settings.tile_size, config)
 
@@ -762,6 +768,7 @@ function onLoaded() {
 				const url = URL.createObjectURL(blob)
 				const filename = (file.name.split(/(?=\.[^.]+$)/))[0] + '_waifu2x_' + method + '.png'
 				set_message(`( ・∀・)つ　<a href="${url}" download="${filename}">Download</a>`, -1, true)
+				feedback.disabled = false
 			}, 'image/png')
 		}
 	}
@@ -808,17 +815,27 @@ function onLoaded() {
 		}, second * 1000)
 	}
 
-	document.getElementById('start').addEventListener('click', async () => {
+	start.addEventListener('click', async () => {
 		const filePicker = document.getElementById('file') as HTMLInputElement
 		if (filePicker.files.length > 0 && filePicker.files[0].type.match(/image/)) {
-			await start(filePicker.files[0])
+			await process(filePicker.files[0])
 		} else {
 			set_message('(ﾟ∀ﾟ) No Image Found')
 		}
 	})
 
-	document.getElementById('stop').addEventListener('click', () => {
+	stop.addEventListener('click', () => {
 		onnx_runner.stop_flag = true
+	})
+
+	feedback.addEventListener('click', () => {
+		feedback.disabled = true
+		filePicker.files = null
+		src.width = dest.width
+		src.height = dest.height
+		src.getContext('2d', {willReadFrequently: true}).drawImage(dest, 0, 0)
+		src.style.width = 'auto'
+		src.style.height = '128px'
 	})
 
 	load_settings()
