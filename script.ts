@@ -704,6 +704,19 @@ function onLoaded() {
 		filePicker.dispatchEvent(new Event('change'))
 	})
 
+	document.addEventListener('paste', e => {
+		if (e.clipboardData?.files?.[0]?.type?.match(/image/)) {
+			if (onnx_runner.running) {
+				console.log('Already running')
+				return e.preventDefault()
+			}
+
+			e.preventDefault()
+			filePicker.files = e.clipboardData.files
+			filePicker.dispatchEvent(new Event('change'))
+		}
+	})
+
 	async function process(file) {
 		if (onnx_runner.running) {
 			console.log('Already running')
