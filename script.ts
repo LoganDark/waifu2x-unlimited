@@ -2,7 +2,6 @@
 
 // @ts-ignore
 import type * as ort from 'onnxruntime-common'
-import type $        from 'jquery'
 
 declare const ort: typeof import('onnxruntime-common')
 
@@ -264,6 +263,16 @@ const SeamBlending = class {
 	}
 }
 
+interface SettingsSnapshot {
+	model_name: 'swin_unet.art' | 'swin_unet.photo' | 'cunet',
+	noise: -1 | 0 | 1 | 2 | 3,
+	scale: 1 | 2 | 4,
+	tile_size: number,
+	tile_random: boolean,
+	tta_level: 0 | 2 | 4,
+	detect_alpha: boolean
+}
+
 const onnx_runner = {
 	stop_flag: false,
 	running: false,
@@ -394,7 +403,7 @@ const onnx_runner = {
 		}
 	},
 
-	async tiled_render(image_data, config, alpha_config, tta_level, tile_size, tile_random, output_canvas, block_callback) {
+	async tiled_render(image_data, model_config, alpha_config, settings: SettingsSnapshot, output_canvas, block_callback) {
 		this.stop_flag = false
 
 		if (this.running) {
@@ -404,26 +413,26 @@ const onnx_runner = {
 
 		this.running = true
 
-		console.log(`tile size = ${tile_size}`)
+		console.log(`tile size = ${settings.tile_size}`)
 
-		output_canvas.width = image_data.width * config.scale
-		output_canvas.height = image_data.height * config.scale
+		output_canvas.width = image_data.width * model_config.scale
+		output_canvas.height = image_data.height * model_config.scale
 
 		const output_ctx = output_canvas.getContext('2d', {willReadFrequently: true})
-		const model = await onnx_session.get_session(config.path)
+		const model = await onnx_session.get_session(model_config.path)
 		const has_alpha = alpha_config != null
 		const alpha_model = has_alpha ? await onnx_session.get_session(alpha_config.path) : null
 
 		const [rgb, alpha1, alpha3] = this.to_input(image_data.data, image_data.width, image_data.height, has_alpha)
 
-		const seam_blending = new SeamBlending(rgb.dims, config.scale, config.offset, tile_size)
-		const seam_blending_alpha = has_alpha ? new SeamBlending(alpha3.dims, config.scale, config.offset, tile_size) : null
+		const seam_blending = new SeamBlending(rgb.dims, model_config.scale, model_config.offset, settings.tile_size)
+		const seam_blending_alpha = has_alpha ? new SeamBlending(alpha3.dims, model_config.scale, model_config.offset, settings.tile_size) : null
 
 		await Promise.all([seam_blending.build(), seam_blending_alpha?.build()])
 
 		const {pad, h_blocks, w_blocks, input_tile_step, output_tile_step} = seam_blending.get_rendering_config()
 		const rgb_padded = await this.padding(
-			has_alpha ? await this.alpha_border_padding(rgb, alpha1, BigInt(config.offset)) : rgb,
+			has_alpha ? await this.alpha_border_padding(rgb, alpha1, BigInt(model_config.offset)) : rgb,
 			BigInt(pad[0]), BigInt(pad[1]), BigInt(pad[2]), BigInt(pad[3])
 		)
 
@@ -458,7 +467,7 @@ const onnx_runner = {
 			}
 		}
 
-		if (tile_random) {
+		if (settings.tile_random) {
 			this.shuffleArray(tiles)
 		}
 
@@ -469,22 +478,22 @@ const onnx_runner = {
 			    tile_alpha: ort.TypedTensor<'float32'> | null
 
 			const [h_in, w_in, h_out, w_out, h_i, w_i] = tiles[k]
-			const tile_image_data = input_ctx.getImageData(w_in, h_in, tile_size, tile_size)
+			const tile_image_data = input_ctx.getImageData(w_in, h_in, settings.tile_size, settings.tile_size)
 			const single_color = this.check_single_color(tile_image_data.data, has_alpha)
 
 			if (single_color) {
-				[tile, tile_alpha] = this.create_single_color_tensor(single_color, tile_size * config.scale - config.offset * 2)
+				[tile, tile_alpha] = this.create_single_color_tensor(single_color, settings.tile_size * model_config.scale - model_config.offset * 2)
 			} else {
 				[tile, , tile_alpha] = this.to_input(tile_image_data.data, tile_image_data.width, tile_image_data.height, has_alpha)
 
-				if (tta_level > 0) {
-					tile = await this.tta_split(tile, BigInt(tta_level))
+				if (settings.tta_level > 0) {
+					tile = await this.tta_split(tile, BigInt(settings.tta_level))
 				}
 
 				tile = (await model.run({x: tile})).y as ort.TypedTensor<'float32'>
 
-				if (tta_level > 0) {
-					tile = await this.tta_merge(tile, BigInt(tta_level))
+				if (settings.tta_level > 0) {
+					tile = await this.tta_merge(tile, BigInt(settings.tta_level))
 				}
 
 				if (alpha_model) {
@@ -550,80 +559,186 @@ const onnx_runner = {
 	}
 }
 
-$(function() {
+const currentSettings: SettingsSnapshot = {
+	model_name: 'swin_unet.art',
+	noise: 0,
+	scale: 2,
+	tile_size: 64,
+	tile_random: false,
+	tta_level: 0,
+	detect_alpha: false
+}
+
+const load_settings = () => {
+	for (const [key, value] of Object.entries(currentSettings)) {
+		const persisted = localStorage[key]
+
+		if (typeof persisted == typeof value) {
+			currentSettings[key] = persisted
+		}
+	}
+}
+
+const save_settings = () => {
+	for (const [key, value] of Object.entries(currentSettings)) {
+		localStorage[key] = value
+	}
+}
+
+if (document.readyState === 'complete' || document.readyState === 'interactive') {
+	onLoaded()
+} else {
+	document.addEventListener('DOMContentLoaded', onLoaded)
+}
+
+function onLoaded() {
 	ort.env.wasm.proxy = true
 
-	function removeAlpha(blob) {
-		return blob
+	const src = document.getElementById('src') as HTMLCanvasElement
+	const dest = document.getElementById('dest') as HTMLCanvasElement
+
+	src.addEventListener('click', () => {
+		if (src.style.height === 'auto') {
+			src.style.width = `auto`
+			src.style.height = `128px`
+		} else {
+			src.style.width = `auto`
+			src.style.height = `auto`
+		}
+	})
+
+	dest.addEventListener('click', () => {
+		if (dest.style.width === 'auto') {
+			dest.style.width = `60%`
+			dest.style.height = `auto`
+		} else {
+			dest.style.width = `auto`
+			dest.style.height = `auto`
+		}
+	})
+
+	function set_input_image(file: File) {
+		const reader = new FileReader()
+
+		reader.addEventListener('load', () => {
+			const img = new Image()
+			img.src = reader.result as string
+			img.addEventListener('load', () => {
+				src.width = img.naturalWidth
+				src.height = img.naturalHeight
+				src.getContext('2d', {willReadFrequently: true}).drawImage(img, 0, 0)
+				src.style.height = '128px'
+				src.style.width = 'auto'
+
+				dest.width = 128
+				dest.height = 128
+				dest.getContext('2d', {willReadFrequently: true}).clearRect(0, 0, dest.width, dest.height)
+				dest.style.width = 'auto'
+				dest.style.height = 'auto'
+
+				;(document.getElementById('start') as HTMLButtonElement).disabled = false
+			})
+		})
+
+		;(document.getElementById('start') as HTMLButtonElement).disabled = true
+		reader.readAsDataURL(file)
 	}
 
-	async function process(file) {
+	function clear_input_image() {
+		src.width = 128
+		src.height = 128
+		src.getContext('2d', {willReadFrequently: true}).clearRect(0, 0, src.width, src.height)
+		src.style.height = 'auto'
+		src.style.width = 'auto'
+
+		dest.width = 128
+		dest.height = 128
+		dest.getContext('2d', {willReadFrequently: true}).clearRect(0, 0, dest.width, dest.height)
+		dest.style.height = 'auto'
+		dest.style.width = 'auto'
+	}
+
+	const filePicker = document.getElementById('file') as HTMLInputElement
+
+	filePicker.addEventListener('change', () => {
 		if (onnx_runner.running) {
 			console.log('Already running')
 			return
 		}
-		var model_name = $('select[name=model]').val()
-		var [arch, style] = model_name.split('.')
-		var scale = parseInt($('select[name=scale]').val())
-		var noise_level = parseInt($('select[name=noise_level]').val())
-		var method
-		if (scale == 1) {
-			if (noise_level == -1) {
+
+		if (filePicker.files?.[0]?.type?.match(/image/)) {
+			set_input_image(filePicker.files[0])
+			set_message('( ・∀・)b')
+		} else {
+			clear_input_image()
+			set_message('(ﾟ∀ﾟ)', 1)
+		}
+	})
+
+	document.addEventListener('dragover', e => e.preventDefault())
+	document.addEventListener('drop', e => {
+		if (!e.dataTransfer?.files) {
+			return e.preventDefault()
+		}
+
+		if (onnx_runner.running) {
+			console.log('Already running')
+			return e.preventDefault()
+		}
+
+		filePicker.files = e.dataTransfer.files
+		e.preventDefault()
+	})
+
+	async function start(file) {
+		if (onnx_runner.running) {
+			console.log('Already running')
+			return
+		}
+
+		const settings = currentSettings
+
+		const [arch, style] = settings.model_name.split('.')
+		let method
+
+		if (settings.scale == 1) {
+			if (settings.noise == -1) {
 				set_message('(・A・) No Noise Reduction selected!')
 				return
 			}
-			method = 'noise' + noise_level
-		} else if (scale == 2) {
-			if (noise_level == -1) {
-				method = 'scale2x'
+			method = `noise${settings.noise}`
+		} else {
+			if (settings.noise == -1) {
+				method = `scale${settings.scale}x`
 			} else {
-				method = 'noise' + noise_level + '_scale2x'
-			}
-		} else if (scale == 4) {
-			if (noise_level == -1) {
-				method = 'scale4x'
-			} else {
-				method = 'noise' + noise_level + '_scale4x'
+				method = `noise${settings.noise}_scale${settings.scale}x`
 			}
 		}
+
 		const config = CONFIG.get_config(arch, style, method)
+
 		if (config == null) {
 			set_message('(・A・) Model Not found!')
 			return
 		}
-		const tile_size = config.calc_tile_size(parseInt($('select[name=tile_size]').val()), config)
-		const tile_random = $('input[name=tile_random]').prop('checked')
-		const tta_level = parseInt($('select[name=tta]').val())
-		var canvas = $('#src').get(0)
-		var ctx = canvas.getContext('2d', {
-			willReadFrequently: true
-		})
-		$('#dest').css({
-			width: 'auto',
-			height: 'auto'
-		})
-		var output_canvas = $('#dest').get(0)
-		var image_data = ctx.getImageData(0, 0, canvas.width, canvas.height)
-		const alpha_enabled = parseInt($('select[name=alpha]').val()) == 1
-		const has_alpha = !alpha_enabled ? false : onnx_runner.check_alpha_channel(image_data.data)
-		var alpha_config = null
-		if (has_alpha) {
-			var alpha_method
-			if (method.includes('scale2x')) {
-				alpha_method = 'scale2x'
-			} else if (method.includes('scale4x')) {
-				alpha_method = 'scale4x'
-			} else {
-				alpha_method = 'scale1x'
-			}
-			alpha_config = CONFIG.get_config(arch, style, alpha_method)
-			if (alpha_config == null) {
-				set_message('(・A・) Model Not found!')
-				return
-			}
+
+		const image_data = src.getContext('2d', {willReadFrequently: true}).getImageData(0, 0, src.width, src.height)
+		const has_alpha = !settings.detect_alpha ? false : onnx_runner.check_alpha_channel(image_data.data)
+		const alpha_config = has_alpha ? CONFIG.get_config(arch, style, /scale\d+x/.exec(method)?.[0] ?? 'scale1x') : null
+
+		if (has_alpha && !alpha_config) {
+			set_message('(・A・) Model Not found!')
+			return
 		}
+
 		set_message('(・∀・)φ ... ', -1)
-		await onnx_runner.tiled_render(image_data, config, alpha_config, tta_level, tile_size, tile_random, output_canvas, (progress, max_progress, processing) => {
+
+		dest.style.width = 'auto'
+		dest.style.height = 'auto'
+
+		const tile_size = config.calc_tile_size(settings.tile_size, config)
+
+		await onnx_runner.tiled_render(image_data, config, alpha_config, {...settings, tile_size}, dest, (progress, max_progress, processing) => {
 				if (processing) {
 					const progress_message = '(' + progress + '/' + max_progress + ')'
 					loop_message(['( ・∀・)' + (progress % 2 == 0 ? 'φ　 ' : ' φ　') + progress_message, '( ・∀・)' + (progress % 2 != 0 ? 'φ　 ' : ' φ　') + progress_message], 0.5)
@@ -632,297 +747,179 @@ $(function() {
 				}
 			}
 		)
+
 		if (!onnx_runner.stop_flag) {
-			var output_canvas = $('#dest').get(0)
-			output_canvas.toBlob((blob) => {
-					var url = URL.createObjectURL(removeAlpha(blob))
-					var filename = (file.name.split(/(?=\.[^.]+$)/))[0] + '_waifu2x_' + method + '.png'
-					set_message('( ・∀・)つ　<a href="' + url + '" download="' + filename + '">Download</a>', -1, true)
-				}
-				, 'image/png')
+			dest.toBlob((blob) => {
+				const url = URL.createObjectURL(blob)
+				const filename = (file.name.split(/(?=\.[^.]+$)/))[0] + '_waifu2x_' + method + '.png'
+				set_message(`( ・∀・)つ　<a href="${url}" download="${filename}">Download</a>`, -1, true)
+			}, 'image/png')
 		}
 	}
 
-	function set_input_image(file) {
-		var reader = new FileReader()
-		reader.addEventListener('load', function() {
-			var img = new Image()
-			img.src = reader.result as string
-			img.onload = () => {
-				var canvas = $('#src').get(0)
-				canvas.width = img.naturalWidth
-				canvas.height = img.naturalHeight
-				var ctx = canvas.getContext('2d', {
-					willReadFrequently: true
-				})
-				ctx.drawImage(img, 0, 0)
-				var h_scale = 128 / img.naturalHeight
-				$('#src').css({
-					width: Math.floor(h_scale * img.naturalWidth),
-					height: 128
-				})
-				var canvas = $('#dest').get(0)
-				canvas.width = 128
-				canvas.height = 128
-				var ctx = canvas.getContext('2d', {
-					willReadFrequently: true
-				})
-				ctx.clearRect(0, 0, canvas.width, canvas.height)
-				$('#dest').css({
-					width: 128,
-					height: 128
-				})
-				$('#start').prop('disabled', false)
-			}
-
-		})
-		$('#start').prop('disabled', true)
-		reader.readAsDataURL(file)
-	}
-
-	function clear_input_image() {
-		var canvas = $('#src').get(0)
-		canvas.width = 128
-		canvas.height = 128
-		var ctx = canvas.getContext('2d', {
-			willReadFrequently: true
-		})
-		ctx.clearRect(0, 0, canvas.width, canvas.height)
-		$('#src').css({
-			width: 128,
-			height: 128
-		})
-		var canvas = $('#dest').get(0)
-		canvas.width = 128
-		canvas.height = 128
-		var ctx = canvas.getContext('2d', {
-			willReadFrequently: true
-		})
-		ctx.clearRect(0, 0, canvas.width, canvas.height)
-		$('#dest').css({
-			width: 'auto',
-			height: 'auto'
-		})
-	}
+	const message = document.getElementById('message')
 
 	function set_message(text, second = 2, html = false) {
 		if (html) {
-			$('#message').html(text)
+			message.innerHTML = text
 		} else {
-			$('#message').text(text)
+			message.innerText = text
 		}
+
 		if (second > 0) {
+			const text_node = document.createTextNode('')
+			message.appendChild(text_node)
+
 			setTimeout(() => {
-					if ($('#message').text() == text) {
-						$('#message').text('( ・∀・)')
-					}
+				if (text_node.parentNode == message) {
+					message.innerText = '( ・∀・)'
 				}
-				, second * 1000)
+			}, second * 1000)
 		}
 	}
 
 	function loop_message(texts, second = 0.5) {
-		var i = 0
-		$('#message').text(texts[i])
-		var id = setInterval(() => {
-				var prev_message = texts[i % texts.length]
-				++i
-				var next_message = texts[i % texts.length]
-				if ($('#message').text() == prev_message) {
-					$('#message').text(next_message)
-				} else {
-					clearInterval(id)
-				}
+		message.innerText = texts[0]
+
+		const text_node = document.createTextNode('')
+		message.appendChild(text_node)
+
+		let id, i = 0
+
+		id = setInterval(() => {
+			i++
+			i %= texts.length
+
+			if (text_node.parentNode !== message) {
+				clearInterval(id)
+			} else {
+				message.innerText = texts[i]
+				message.appendChild(text_node)
 			}
-			, second * 1000)
+		}, second * 1000)
 	}
 
-	$('#start').click(async () => {
-			const file = $('#file').get(0)
-			if (file.files.length > 0 && file.files[0].type.match(/image/)) {
-				await process(file.files[0])
-			} else {
-				set_message('(ﾟ∀ﾟ) No Image Found')
-			}
-		}
-	)
-	$('#file').change(() => {
-			if (onnx_runner.running) {
-				console.log('Already running')
-				return
-			}
-			const file = $('#file').get(0)
-			if (file.files.length > 0 && file.files[0].type.match(/image/)) {
-				set_input_image(file.files[0])
-				set_message('( ・∀・)b')
-			} else {
-				clear_input_image()
-				set_message('(ﾟ∀ﾟ)', 1)
-			}
-		}
-	)
-	$(document).on({
-		dragover: function() {
-			return false
-		},
-		drop: function(e) {
-			if (!(e.originalEvent.dataTransfer && e.originalEvent.dataTransfer.files.length)) {
-				return false
-			}
-			if (onnx_runner.running) {
-				console.log('Already running')
-				return false
-			}
-			file = e.originalEvent.dataTransfer
-			if (file.files.length > 0 && file.files[0].type.match(/image/)) {
-				var files = new DataTransfer()
-				files.items.add(file.files[0])
-				$('#file').get(0).files = files.files
-				$('#file').trigger('change')
-				return false
-			} else {
-				return false
-			}
+	document.getElementById('start').addEventListener('click', async () => {
+		const filePicker = document.getElementById('file') as HTMLInputElement
+		if (filePicker.files.length > 0 && filePicker.files[0].type.match(/image/)) {
+			await start(filePicker.files[0])
+		} else {
+			set_message('(ﾟ∀ﾟ) No Image Found')
 		}
 	})
-	$('#stop').click(() => {
-			onnx_runner.stop_flag = true
-		}
-	)
-	$('#src').click(() => {
-			var canvas = $('#src').get(0)
-			var css_width = parseInt($('#src').css('width'))
-			if (css_width != canvas.width) {
-				$('#src').css({
-					width: canvas.width,
-					height: canvas.height
-				})
-			} else {
-				var height = 128
-				var width = Math.floor((height / canvas.height) * canvas.width)
-				$('#src').css({
-					width: width,
-					height: height
-				})
-			}
-		}
-	)
-	$('#dest').click(() => {
-			var width = $('#dest').css('width')
-			var canvas = $('#dest').get(0)
-			if (width == 'auto' || parseInt(width) == canvas.width) {
-				$('#dest').css({
-					'width': '60%',
-					'height': 'auto'
-				})
-			} else {
-				$('#dest').css({
-					'width': 'auto',
-					'height': 'auto'
-				})
-			}
-		}
-	)
 
-	function restore_from_cookie() {
-		if ($.cookie('model')) {
-			$('select[name=model]').val($.cookie('model'))
-			if (!$('select[name=model]').val()) {
-				$('select[name=model]').val('swin_unet.art')
-			}
-		}
-		if ($.cookie('noise_level')) {
-			$('select[name=noise_level]').val($.cookie('noise_level'))
-		}
-		if ($.cookie('scale')) {
-			$('select[name=scale]').val($.cookie('scale'))
-		}
-		if ($.cookie('tile_size')) {
-			$('select[name=tile_size]').val($.cookie('tile_size'))
-		}
-		if ($.cookie('tile_random') == 'true') {
-			$('input[name=tile_random]').prop('checked', true)
-		}
-		if ($.cookie('tta')) {
-			$('select[name=tta]').val($.cookie('tta'))
-		}
-		if ($.cookie('alpha')) {
-			$('select[name=alpha]').val($.cookie('alpha'))
-		}
-	}
+	document.getElementById('stop').addEventListener('click', () => {
+		onnx_runner.stop_flag = true
+	})
 
-	restore_from_cookie()
-	$('select[name=model]').change(() => {
-			var model = $('select[name=model]').val()
-			var [arch, style] = model.split('.')
-			$.cookie('model', model, {
-				expires: g_expires
+	load_settings()
+	save_settings()
+
+	document.getElementsByName('model').forEach(elem => {
+		if (elem instanceof HTMLSelectElement) {
+			elem.value = currentSettings.model_name
+
+			elem.addEventListener('change', () => {
+				currentSettings.model_name = elem.value as any
+				save_settings()
+
+				const is_swin_unet = currentSettings.model_name.split('.')?.[0] === 'swin_unet'
+
+				document.getElementsByName('scale').forEach(elem => {
+					if (elem instanceof HTMLSelectElement) {
+						const scale_4x = elem.options.namedItem('scale_4x')
+						const scale_2x = elem.options.namedItem('scale_2x')
+
+						if (elem.selectedIndex == scale_4x.index && !is_swin_unet) {
+							elem.selectedIndex = scale_2x.index
+						}
+
+						scale_4x.disabled = !is_swin_unet
+					}
+				})
+
+				document.getElementById('scale-comment').style.display = is_swin_unet ? 'none' : 'unset'
+
+				document.getElementById('tile-comment').style.display =
+					currentSettings.model_name.split('.')?.[1] == 'photo' && currentSettings.tile_size < 256 ? 'unset' : 'none'
 			})
-			if (arch == 'swin_unet') {
-				$('select[name=scale]').children('option[value=4]').show()
-				$('#scale-comment').hide()
-			} else {
-				var scale = $('select[name=scale]').val()
-				$('select[name=scale]').children('option[value=4]').hide()
-				$('#scale-comment').show()
-				if (scale == '4') {
-					$('select[name=scale]').val('2')
-				}
-			}
-			if ((style == 'photo' || style == 'photo_gan') && $('select[name=tile_size]').val() < 256) {
-				$('#tile-comment').show()
-			} else {
-				$('#tile-comment').hide()
-			}
+
+			elem.dispatchEvent(new Event('change'))
 		}
-	)
-	$('select[name=model]').trigger('change')
-	$('select[name=noise_level]').change(() => {
-			$.cookie('noise_level', $('select[name=noise_level]').val(), {
-				expires: g_expires
-			})
-		}
-	)
-	$('select[name=scale]').change(() => {
-			$.cookie('scale', $('select[name=scale]').val(), {
-				expires: g_expires
-			})
-		}
-	)
-	$('select[name=tile_size]').change(() => {
-			$.cookie('tile_size', $('select[name=tile_size]').val(), {
-				expires: g_expires
-			})
-			var model = $('select[name=model]').val()
-			var [arch, style] = model.split('.')
-			if ((style == 'photo' || style == 'photo_gan') && $('select[name=tile_size]').val() < 256) {
-				$('#tile-comment').show()
-			} else {
-				$('#tile-comment').hide()
-			}
-		}
-	)
-	$('input[name=tile_random]').change(() => {
-			$.cookie('tile_random', $('input[name=tile_random]').prop('checked'), {
-				expires: g_expires
+	})
+
+	document.getElementsByName('noise_level').forEach(elem => {
+		if (elem instanceof HTMLSelectElement) {
+			elem.value = currentSettings.noise.toString()
+
+			elem.addEventListener('change', () => {
+				currentSettings.noise = parseInt(elem.value, 10) as any
+				save_settings()
 			})
 		}
-	)
-	$('select[name=tta]').change(() => {
-			$.cookie('tta', $('select[name=tta]').val(), {
-				expires: g_expires
+	})
+
+	document.getElementsByName('scale').forEach(elem => {
+		if (elem instanceof HTMLSelectElement) {
+			elem.value = currentSettings.scale.toString()
+
+			elem.addEventListener('change', () => {
+				currentSettings.scale = parseInt(elem.value, 10) as any
+				save_settings()
 			})
 		}
-	)
-	$('select[name=alpha]').change(() => {
-			$.cookie('alpha', $('select[name=alpha]').val(), {
-				expires: g_expires
+	})
+
+	document.getElementsByName('tile_size').forEach(elem => {
+		if (elem instanceof HTMLSelectElement) {
+			elem.value = currentSettings.tile_size.toString()
+
+			elem.addEventListener('change', () => {
+				currentSettings.tile_size = parseInt(elem.value, 10) as any
+				save_settings()
+
+				document.getElementById('tile-comment').style.display =
+					currentSettings.model_name.split('.')?.[1] == 'photo' && currentSettings.tile_size < 256 ? 'unset' : 'none'
 			})
 		}
-	)
+	})
+
+	document.getElementsByName('tile_random').forEach(elem => {
+		if (elem instanceof HTMLInputElement && elem.type === 'checkbox') {
+			elem.checked = currentSettings.tile_random
+
+			elem.addEventListener('change', () => {
+				currentSettings.tile_random = elem.checked
+				save_settings()
+			})
+		}
+	})
+
+	document.getElementsByName('tta').forEach(elem => {
+		if (elem instanceof HTMLSelectElement) {
+			elem.value = currentSettings.tta_level.toString()
+
+			elem.addEventListener('change', () => {
+				currentSettings.tta_level = parseInt(elem.value, 10) as any
+				save_settings()
+			})
+		}
+	})
+
+	document.getElementsByName('alpha').forEach(elem => {
+		if (elem instanceof HTMLSelectElement) {
+			elem.value = currentSettings.detect_alpha ? '1' : '0'
+
+			elem.addEventListener('change', () => {
+				currentSettings.detect_alpha = elem.value === '1'
+				save_settings()
+			})
+		}
+	})
+
 	window.addEventListener('unhandledrejection', function(e) {
 		set_message('(-_-) Error: ' + e.reason, -1)
 		onnx_runner.running = false
 		onnx_runner.stop_flag = false
 	})
-})
+}
