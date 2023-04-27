@@ -884,6 +884,7 @@ function onLoaded() {
 
 						if (elem.selectedIndex == scale_4x.index && !is_swin_unet) {
 							elem.selectedIndex = scale_2x.index
+							elem.dispatchEvent(new Event('change'))
 						}
 
 						scale_4x.disabled = !is_swin_unet
