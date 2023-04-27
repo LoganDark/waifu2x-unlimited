@@ -605,6 +605,7 @@ function onLoaded() {
 	ort.env.wasm.proxy = true
 
 	const src = document.getElementById('src') as HTMLCanvasElement
+	let src_name = ''
 	const dest = document.getElementById('dest') as HTMLCanvasElement
 
 	const start = document.getElementById('start') as HTMLButtonElement
@@ -644,6 +645,7 @@ function onLoaded() {
 				src.getContext('2d', {willReadFrequently: true}).drawImage(img, 0, 0)
 				src.style.height = '128px'
 				src.style.width = 'auto'
+				src_name = file.name
 
 				// dest.width = 128
 				// dest.height = 128
@@ -721,7 +723,7 @@ function onLoaded() {
 		}
 	})
 
-	async function process(file) {
+	async function process() {
 		if (onnx_runner.running) {
 			console.log('Already running')
 			return
@@ -792,7 +794,7 @@ function onLoaded() {
 
 			dest.toBlob((blob) => {
 				const url = URL.createObjectURL(blob)
-				const filename = (file.name.split(/(?=\.[^.]+$)/))[0] + '_waifu2x_' + method + '.png'
+				const filename = (src_name.split(/(?=\.[^.]+$)/))[0] + '_waifu2x_' + method + '.png'
 				set_message(`( ・∀・)つ　<a href="${url}" download="${filename}">Download</a> - took ${formatTime(total)} (${Math.ceil(total * 1000)}ms)`, -1, true)
 				feedback.disabled = false
 			}, 'image/png')
@@ -842,9 +844,8 @@ function onLoaded() {
 	}
 
 	start.addEventListener('click', async () => {
-		const filePicker = document.getElementById('file') as HTMLInputElement
-		if (filePicker.files.length > 0 && filePicker.files[0].type.match(/image/)) {
-			await process(filePicker.files[0])
+		if (filePicker.value !== '') {
+			await process()
 		} else {
 			set_message('(ﾟ∀ﾟ) No Image Found')
 		}
