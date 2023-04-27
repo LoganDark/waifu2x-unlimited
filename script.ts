@@ -781,7 +781,12 @@ function onLoaded() {
 			const eta = (max_progress - progress) / progress * spent
 
 			if (processing) {
-				const progress_message = `(${progress}/${max_progress}) - ${formatTime(spent)} spent - ${formatTime(eta)} remaining`
+				let progress_message = `(${progress}/${max_progress})`
+
+				if (progress > 0) {
+					progress_message += `- ${formatTime(spent)} spent - ${formatTime(eta)} remaining`
+				}
+
 				loop_message(['( ・∀・)' + (progress % 2 == 0 ? 'φ　 ' : ' φ　') + progress_message, '( ・∀・)' + (progress % 2 != 0 ? 'φ　 ' : ' φ　') + progress_message], 0.5)
 			} else {
 				set_message('(・A・)!!', 1)
