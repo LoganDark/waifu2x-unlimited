@@ -768,21 +768,30 @@ function onLoaded() {
 
 		const tile_size = config.calc_tile_size(settings.tile_size, config)
 
+		const formatTime = secs => `${Math.floor(secs / 60).toString(10).padStart(2, '0')}:${Math.floor(secs % 60).toString(10).padStart(2, '0')}`
+		const start = performance.now()
+
 		await onnx_runner.tiled_render(image_data, config, alpha_config, {...settings, tile_size}, dest, (progress, max_progress, processing) => {
-				if (processing) {
-					const progress_message = '(' + progress + '/' + max_progress + ')'
-					loop_message(['( ・∀・)' + (progress % 2 == 0 ? 'φ　 ' : ' φ　') + progress_message, '( ・∀・)' + (progress % 2 != 0 ? 'φ　 ' : ' φ　') + progress_message], 0.5)
-				} else {
-					set_message('(・A・)!!', 1)
-				}
+			const now = performance.now()
+			const spent = (now - start) / 1000
+			const eta = (max_progress - progress) / progress * spent
+
+			if (processing) {
+				const progress_message = `(${progress}/${max_progress}) - ${formatTime(spent)} spent - ${formatTime(eta)} remaining`
+				loop_message(['( ・∀・)' + (progress % 2 == 0 ? 'φ　 ' : ' φ　') + progress_message, '( ・∀・)' + (progress % 2 != 0 ? 'φ　 ' : ' φ　') + progress_message], 0.5)
+			} else {
+				set_message('(・A・)!!', 1)
 			}
-		)
+		})
 
 		if (!onnx_runner.stop_flag) {
+			const end = performance.now()
+			const total = (end - start) / 1000
+
 			dest.toBlob((blob) => {
 				const url = URL.createObjectURL(blob)
 				const filename = (file.name.split(/(?=\.[^.]+$)/))[0] + '_waifu2x_' + method + '.png'
-				set_message(`( ・∀・)つ　<a href="${url}" download="${filename}">Download</a>`, -1, true)
+				set_message(`( ・∀・)つ　<a href="${url}" download="${filename}">Download</a> - took ${formatTime(total)} (${Math.ceil(total * 1000)}ms)`, -1, true)
 				feedback.disabled = false
 			}, 'image/png')
 		}
