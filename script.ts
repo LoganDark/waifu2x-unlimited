@@ -638,11 +638,11 @@ function onLoaded() {
 				src.style.height = '128px'
 				src.style.width = 'auto'
 
-				dest.width = 128
-				dest.height = 128
-				dest.getContext('2d', {willReadFrequently: true}).clearRect(0, 0, dest.width, dest.height)
-				dest.style.width = 'auto'
-				dest.style.height = 'auto'
+				// dest.width = 128
+				// dest.height = 128
+				// dest.getContext('2d', {willReadFrequently: true}).clearRect(0, 0, dest.width, dest.height)
+				// dest.style.width = 'auto'
+				// dest.style.height = 'auto'
 
 				;(document.getElementById('start') as HTMLButtonElement).disabled = false
 			})
@@ -659,11 +659,11 @@ function onLoaded() {
 		src.style.height = 'auto'
 		src.style.width = 'auto'
 
-		dest.width = 128
-		dest.height = 128
-		dest.getContext('2d', {willReadFrequently: true}).clearRect(0, 0, dest.width, dest.height)
-		dest.style.height = 'auto'
-		dest.style.width = 'auto'
+		// dest.width = 128
+		// dest.height = 128
+		// dest.getContext('2d', {willReadFrequently: true}).clearRect(0, 0, dest.width, dest.height)
+		// dest.style.height = 'auto'
+		// dest.style.width = 'auto'
 	}
 
 	const filePicker = document.getElementById('file') as HTMLInputElement
