@@ -685,7 +685,7 @@ function onLoaded() {
 
 	document.addEventListener('dragover', e => e.preventDefault())
 	document.addEventListener('drop', e => {
-		if (!e.dataTransfer?.files) {
+		if (!e.dataTransfer?.files?.[0]?.type?.match(/image/)) {
 			return e.preventDefault()
 		}
 
@@ -694,8 +694,9 @@ function onLoaded() {
 			return e.preventDefault()
 		}
 
-		filePicker.files = e.dataTransfer.files
 		e.preventDefault()
+		filePicker.files = e.dataTransfer.files
+		filePicker.dispatchEvent(new Event('change'))
 	})
 
 	async function start(file) {
