@@ -630,6 +630,7 @@ function onLoaded() {
 	})
 
 	function set_input_image(file: File) {
+		const feedbackWasDisabled = feedback.disabled
 		const reader = new FileReader()
 
 		reader.addEventListener('load', () => {
@@ -649,6 +650,7 @@ function onLoaded() {
 				// dest.style.height = 'auto'
 
 				start.disabled = false
+				feedback.disabled = feedbackWasDisabled
 			})
 		})
 
