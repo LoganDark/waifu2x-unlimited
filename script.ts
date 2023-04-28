@@ -378,43 +378,47 @@ const onnx_runner = {
 
 			for (let x = 0; x < width; x++) {
 				const i = offset + x
+				const i4 = i * 4
 
-				image_data.set([
-					rgb_data[i],
-					rgb_data[i + len],
-					rgb_data[i + len * 2],
-					alpha3_data ? (alpha3_data[i] + alpha3_data[i + len] + alpha3_data[i + len * 2]) / 3 : 1
-				].map(c => Math.round(c * 255)), i * 4)
+				image_data[i4] = rgb_data[i] * 255
+				image_data[i4 + 1] = rgb_data[i + len] * 255
+				image_data[i4 + 2] = rgb_data[i + len * 2] * 255
+				image_data[i4 + 3] = (alpha3_data ? (alpha3_data[i] + alpha3_data[i + len] + alpha3_data[i + len * 2]) / 3 : 1) * 255
 			}
 		}
 
 		return new ImageData(image_data, width, height)
 	},
 
-	is_solid_color(pixels: Uint8ClampedArray, keep_alpha = false): readonly [number, number, number, number] | null {
-		const len = pixels.length / 4
-		if (len < 1) return null
+	is_solid_color(pixels: Uint8ClampedArray, keep_alpha = false) {
+		const a = pixels[3] / 255,
+		      r = pixels[0] * a,
+		      g = pixels[1] * a,
+		      b = pixels[2] * a
 
-		const slice = [...pixels.subarray(0, 4)]
-		const a = slice[3]
-		const [r, g, b] = slice.slice(0, 3).map(c => c * a / 255)
+		const len = pixels.length
+		for (let i = 4; i < len; i += 4) {
+			const a2 = pixels[i + 3] / 255,
+			      r2 = pixels[i] * a2,
+			      g2 = pixels[i + 1] * a2,
+			      b2 = pixels[i + 2] * a2
 
-		for (let i = 1; i < len; i++) {
-			const slice2 = [...pixels.subarray(i * 4, i * 4 + 4)]
-			const a2 = slice2[3]
-			const [r2, g2, b2] = slice2.slice(0, 3).map(c => c * a2 / 255)
 			if (r2 !== r || g2 !== g || b2 !== b || (keep_alpha && a2 !== a)) return null
 		}
 
 		if (keep_alpha) {
-			return slice.map(c => c / 255) as any
+			return [r / 255, g / 255, b / 255, a] as const
 		} else {
-			return [...[r, g, b].map(c => c / 255 + (1 - a / 255)), 1] as any
+			return [r / 255 + (1 - a), g / 255 + (1 - a), b / 255 + (1 - a), 1] as const
 		}
 	},
 
 	has_transparency(pixels: Uint8ClampedArray) {
-		return pixels.some((c, i) => i % 4 == 3 && c !== 255)
+		for (let i = 3; i < pixels.length; i += 4) {
+			if (pixels[i] !== 255) return true
+		}
+
+		return false
 	},
 
 	create_solid_color_tensor(color: readonly [number, number, number, number], tile_size: number) {
