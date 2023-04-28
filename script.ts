@@ -224,6 +224,7 @@ const BLEND_SIZE = 16n
 interface SettingsSnapshot {
 	model_name: 'swin_unet.art' | 'swin_unet.photo' | 'cunet'
 	noise: -1n | 0n | 1n | 2n | 3n
+	noise_antialias: boolean
 	scale: 1n | 2n | 4n
 	tile_size: bigint
 	tile_random: boolean
@@ -778,6 +779,11 @@ const onnx_runner = {
 
 					if (this.stop_flag) break
 
+					if (settings.noise_antialias) {
+						tile = await utils.antialias(tile)
+						if (tile_alpha) tile_alpha = await utils.antialias(tile_alpha)
+					}
+
 					const output = await model.run({x: tile})
 					tile = output.y as ort.TypedTensor<'float32'>
 
@@ -806,6 +812,7 @@ const onnx_runner = {
 const currentSettings: SettingsSnapshot = {
 	model_name: 'swin_unet.art',
 	noise: 0n,
+	noise_antialias: false,
 	scale: 2n,
 	tile_size: 64n,
 	tile_random: false,
@@ -978,10 +985,10 @@ function onLoaded() {
 		if (settings.scale == 1n) {
 			if (settings.noise == -1n) {
 				//set_message('(・A・) No Noise Reduction selected!')
-				return
+				method = 'scale1x'
+			} else {
+				method = `noise${settings.noise}`
 			}
-
-			method = `noise${settings.noise}`
 		} else {
 			if (settings.noise == -1n) {
 				method = `scale${settings.scale}x`
@@ -1092,6 +1099,17 @@ function onLoaded() {
 
 			elem.addEventListener('change', () => {
 				currentSettings.noise = BigInt(elem.value) as any
+				save_settings()
+			})
+		}
+	})
+
+	document.getElementsByName('noise_antialias').forEach(elem => {
+		if (elem instanceof HTMLInputElement && elem.type === 'checkbox') {
+			elem.checked = currentSettings.noise_antialias
+
+			elem.addEventListener('change', () => {
+				currentSettings.noise_antialias = elem.checked
 				save_settings()
 			})
 		}
