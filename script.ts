@@ -40,7 +40,7 @@ const CONFIG = {
 
 						for (let i = 0n; ; i++) {
 							const proposed = (mul + i) * 16n
-							if (proposed % 12n == 0n) return proposed
+							if ((proposed - 16n) % 12n == 0n) return proposed
 						}
 					}
 				}
