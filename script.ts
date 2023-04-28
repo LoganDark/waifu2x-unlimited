@@ -135,7 +135,13 @@ const Models = {
 		return null
 	},
 
-	create: (path: string) => ort.InferenceSession.create(path, {executionProviders: ['wasm']}),
+	session_options: {
+		executionProviders: ['wasm'],
+		executionMode: 'parallel',
+		graphOptimizationLevel: 'all'
+	} as any,
+
+	create: (path: string) => ort.InferenceSession.create(path, Models.session_options),
 	get_helper_path: (name: string) => `models/utils/${name}.onnx`,
 	create_helper: (name: string) => Models.create(Models.get_helper_path(name)),
 
@@ -234,13 +240,12 @@ class UtilityModels {
 		private readonly _antialias: ort.InferenceSession
 	) {}
 
-	public static async initialize() {
-		const pad = await Models.create_helper('pad')
-		const tta_split = await Models.create_helper('tta_split')
-		const tta_merge = await Models.create_helper('tta_merge')
-		const alpha_border_padding = await Models.create_helper('alpha_border_padding')
-		const antialias = await Models.create_helper('antialias')
-
+	public static async initialize(session_cache: SessionCache) {
+		const pad = await session_cache.get('pad')
+		const tta_split = await session_cache.get('tta_split')
+		const tta_merge = await session_cache.get('tta_merge')
+		const alpha_border_padding = await session_cache.get('alpha_border_padding')
+		const antialias = await session_cache.get('antialias')
 		return new UtilityModels(pad, tta_split, tta_merge, alpha_border_padding, antialias)
 	}
 
@@ -292,17 +297,17 @@ class UtilityModels {
 }
 
 class SessionCache {
-	private threads: Map<ModelConfig, Promise<ort.InferenceSession>>[] = []
+	private cache: Map<ModelConfig | string, Promise<ort.InferenceSession>> = new Map()
 
 	public constructor() {}
 
-	public get(config: ModelConfig, shard: number = 0) {
-		const cache = this.threads[shard] = this.threads[shard] ?? new Map()
-		const existing = cache.get(config)
+	public get(specifier: ModelConfig | string) {
+		const cache = this.cache
+		const existing = cache.get(specifier)
 
 		if (!existing) {
-			const session = Models.create(config.path)
-			cache.set(config, session)
+			const session = Models.create(typeof specifier === 'string' ? Models.get_helper_path(specifier) : specifier.path)
+			cache.set(specifier, session)
 			return session
 		}
 
@@ -310,9 +315,7 @@ class SessionCache {
 	}
 
 	public delete(config: ModelConfig) {
-		for (const cache of Object.values(this.threads)) {
-			cache.delete(config)
-		}
+		this.cache.delete(config)
 	}
 }
 
@@ -499,20 +502,19 @@ type SeamBlenderFactory = Awaited<ReturnType<typeof SeamBlender.Factory.initiali
 class TileMapper {
 	public static Factory = class TileMapperFactory {
 		private constructor(
-			private readonly utils: UtilityModels,
 			private readonly session_cache: SessionCache,
+			private readonly utils: UtilityModels,
 			private readonly blender_factory: SeamBlenderFactory
 		) {}
 
-		public static async initialize() {
-			const utils = await UtilityModels.initialize()
-			const session_cache = new SessionCache()
+		public static async initialize(session_cache: SessionCache) {
+			const utils = await UtilityModels.initialize(session_cache)
 			const blender_factory = await SeamBlender.Factory.initialize()
-			return new TileMapperFactory(utils, session_cache, blender_factory)
+			return new TileMapperFactory(session_cache, utils, blender_factory)
 		}
 
 		public async create(tile_size: bigint, scale: bigint, offset: bigint, image: ImageData, preprocess_alpha: boolean) {
-			const {utils, session_cache, blender_factory} = this
+			const {session_cache, utils, blender_factory} = this
 
 			const params = new TilingParameters(BigInt(image.width), BigInt(image.height), scale, offset, tile_size)
 
@@ -544,13 +546,13 @@ class TileMapper {
 				}
 			}
 
-			return new TileMapper(utils, session_cache, params, input_canvas, input_ctx, output_canvas, output_ctx, color_blender, alpha_blender, tiles)
+			return new TileMapper(session_cache, utils, params, input_canvas, input_ctx, output_canvas, output_ctx, color_blender, alpha_blender, tiles)
 		}
 	}
 
 	private constructor(
-		private readonly utils: UtilityModels,
 		private readonly session_cache: SessionCache,
+		private readonly utils: UtilityModels,
 		private readonly params: TilingParameters,
 		private readonly input_canvas: OffscreenCanvas,
 		private readonly input_ctx: OffscreenCanvasRenderingContext2D,
@@ -605,7 +607,7 @@ class TileMapper {
 
 	public cancel_submission(tile: ImageData) {
 		const coords = this.image_to_tiles.get(tile)!
-		if (!this.image_to_tiles.delete(tile)) throw new TypeError('invalid tile submission')
+		if (!this.image_to_tiles.delete(tile)) return
 		this.unmapped_tiles.unshift(coords)
 	}
 
@@ -639,12 +641,8 @@ class TileMapper {
 		this.output_ctx.putImageData(this.image_data, Number(out_x), Number(out_y))
 	}
 
-	public get_output_image() {
-		return this.output_canvas.transferToImageBitmap()
-	}
-
-	public generate_output_blob() {
-		return this.output_canvas.convertToBlob()
+	public get_output_canvas() {
+		return this.output_canvas
 	}
 }
 
@@ -705,30 +703,13 @@ const onnx_runner = {
 		return false
 	},
 
-	create_solid_color_tensor(color: readonly [number, number, number, number], tile_size: number) {
-		const len = tile_size * tile_size
-
-		const rgb = new Float32Array(len * 3)
-		rgb.fill(color[0], 0, len)
-		rgb.fill(color[1], len, len * 2)
-		rgb.fill(color[2], len * 2, len * 3)
-
-		const alpha3 = new Float32Array(len * 3)
-		alpha3.fill(color[3])
-
-		return [
-			new ort.Tensor('float32', rgb, [1, 3, tile_size, tile_size]),
-			new ort.Tensor('float32', alpha3, [1, 3, tile_size, tile_size])
-		] as const
-	},
-
 	async tiled_render(
+		session_cache: SessionCache,
 		image_data: ImageData,
 		model_config: ModelConfig,
 		alpha_config: ModelConfig | null,
 		settings: SettingsSnapshot,
-		output_canvas: HTMLCanvasElement,
-		block_callback: (tile: number, total_tiles: number, processing: boolean) => void
+		output_canvas: HTMLCanvasElement
 	) {
 		this.stop_flag = false
 
@@ -737,72 +718,88 @@ const onnx_runner = {
 			return
 		}
 
-		this.running = true
+		try {
+			this.running = true
 
-		const tile_size = model_config.round_tile_size(settings.tile_size)
+			const tile_size = model_config.round_tile_size(settings.tile_size)
 
-		const tile_mapper_factory = await TileMapper.Factory.initialize()
-		const tile_mapper = await tile_mapper_factory.create(tile_size, model_config.scale, model_config.offset, image_data, alpha_config !== null)
+			const tile_mapper_factory = await TileMapper.Factory.initialize(session_cache)
+			const tile_mapper = await tile_mapper_factory.create(tile_size, model_config.scale, model_config.offset, image_data, alpha_config !== null)
 
-		const has_alpha = alpha_config != null
+			const has_alpha = alpha_config != null
 
-		const session_cache = tile_mapper.get_session_cache()
-		const [model, alpha_model] = has_alpha
-			? await Promise.all([session_cache.get(model_config), session_cache.get(alpha_config)])
-			: [await session_cache.get(model_config), null]
+			const tile_mapper_output = tile_mapper.get_output_canvas()
+			output_canvas.width = tile_mapper_output.width
+			output_canvas.height = tile_mapper_output.height
+			const output_ctx = output_canvas.getContext('2d')!
+			output_ctx.drawImage(tile_mapper_output, 0, 0)
 
-		let {width, height} = tile_mapper.get_output_image()
-		output_canvas.width = width
-		output_canvas.height = height
-		let output_ctx = output_canvas.getContext('bitmaprenderer')!
+			const output_tile_size = Number(tile_size * model_config.scale - model_config.offset * 2n)
+			const solid_color = new SolidColorTensor(output_tile_size, output_tile_size)
 
-		block_callback(0, Number(tile_mapper.tiles_remaining()), true)
-
-		const utils = tile_mapper.get_utils()
-		const output_tile_size = Number(tile_size * model_config.scale - model_config.offset * 2n)
-		const solid_color = new SolidColorTensor(output_tile_size, output_tile_size)
-
-		// noinspection JSAssignmentUsedAsCondition
-		for (let tile_image; tile_image = tile_mapper.take_next();) {
-			const color = this.is_solid_color(tile_image.data, has_alpha)
-			if (color) tile_mapper.submit_mapped_tile(tile_image, ...solid_color.color(...color))
-		}
-
-		tile_mapper.cancel_all_submissions()
-
-		const total_tiles = tile_mapper.tiles_remaining()
-		let tiles_completed = 0
-
-		block_callback(0, Number(total_tiles), true)
-
-		// noinspection JSAssignmentUsedAsCondition
-		for (let tile_image; tile_image = settings.tile_random ? tile_mapper.take_random() : tile_mapper.take_next();) {
-			let [tile, , tile_alpha] = Models.image_to_tensors(tile_image.data, tile_image.width, tile_image.height, has_alpha)
-
-			if (settings.tta_level > 0) tile = await utils.tta_split(tile, settings.tta_level)
-
-			const alpha_output = alpha_model && tile_alpha ? alpha_model.run({x: tile_alpha}) : null
-			const output = await model.run({x: tile})
-			tile = output.y as ort.TypedTensor<'float32'>
-			if (await alpha_output) tile_alpha = (await alpha_output!).y as ort.TypedTensor<'float32'>
-
-			if (settings.tta_level > 0) tile = await utils.tta_merge(tile, settings.tta_level)
-
-			tile_mapper.submit_mapped_tile(tile_image, tile, tile_alpha)
-			output_ctx.transferFromImageBitmap(await createImageBitmap(await tile_mapper.generate_output_blob()))
-
-			tiles_completed++
-
-			if (this.stop_flag) {
-				block_callback(tiles_completed, Number(total_tiles), false)
-				this.running = false
-				return
-			} else {
-				block_callback(tiles_completed, Number(total_tiles), true)
+			// noinspection JSAssignmentUsedAsCondition
+			for (let tile_image; tile_image = tile_mapper.take_next();) {
+				const color = this.is_solid_color(tile_image.data, has_alpha)
+				if (color) tile_mapper.submit_mapped_tile(tile_image, ...solid_color.color(...color))
 			}
-		}
 
-		this.running = false
+			tile_mapper.cancel_all_submissions()
+
+			let next_update = performance.now() + 100
+			let animation_frame = null
+
+			const update_during_animation_frame = () => {
+				const now = performance.now()
+				if (now >= next_update) {
+					output_ctx.drawImage(tile_mapper_output, 0, 0)
+					const now2 = performance.now()
+					next_update = now2 + Math.max((now2 - now) * 9, 150)
+				}
+
+				animation_frame = requestAnimationFrame(update_during_animation_frame)
+			}
+
+			animation_frame = requestAnimationFrame(update_during_animation_frame)
+
+			try {
+				const utils = tile_mapper.get_utils()
+				const model = await session_cache.get(model_config)
+				const alpha_model = has_alpha ? await session_cache.get(alpha_config) : null
+
+				while (true) {
+					if (this.stop_flag) break
+
+					const tile_image = settings.tile_random ? tile_mapper.take_random() : tile_mapper.take_next()
+					if (tile_image === null) break
+
+					let [tile, , tile_alpha] = Models.image_to_tensors(tile_image.data, tile_image.width, tile_image.height, has_alpha)
+
+					if (settings.tta_level > 0) tile = await utils.tta_split(tile, settings.tta_level)
+
+					if (this.stop_flag) break
+
+					const output = await model.run({x: tile})
+					tile = output.y as ort.TypedTensor<'float32'>
+
+					if (this.stop_flag) break
+
+					const alpha_output = alpha_model && tile_alpha ? await alpha_model.run({x: tile_alpha}) : null
+					if (alpha_output) tile_alpha = alpha_output.y as ort.TypedTensor<'float32'>
+
+					if (this.stop_flag) break
+
+					if (settings.tta_level > 0) tile = await utils.tta_merge(tile, settings.tta_level)
+
+					tile_mapper.submit_mapped_tile(tile_image, tile, tile_alpha)
+				}
+			} finally {
+				cancelAnimationFrame(animation_frame)
+			}
+
+			output_ctx.drawImage(tile_mapper_output, 0, 0)
+		} finally {
+			this.running = false
+		}
 	}
 }
 
@@ -852,6 +849,7 @@ if (document.readyState === 'complete' || document.readyState === 'interactive')
 }
 
 function onLoaded() {
+	ort.env.wasm.numThreads = navigator.hardwareConcurrency
 	ort.env.wasm.proxy = true
 
 	let filename = ''
@@ -927,10 +925,10 @@ function onLoaded() {
 
 		if (filePicker.files?.[0]?.type?.match(/image/)) {
 			set_input_image(filePicker.files[0])
-			set_message('( ・∀・)b')
+			//set_message('( ・∀・)b')
 		} else {
 			clear_input_image()
-			set_message('(ﾟ∀ﾟ)', 1)
+			//set_message('(ﾟ∀ﾟ)', 1)
 		}
 	})
 
@@ -964,46 +962,7 @@ function onLoaded() {
 	})
 
 	const message = document.getElementById('message')!
-
-	function set_message(text: string, timeout = 2, html = false) {
-		if (html) {
-			message.innerHTML = text
-		} else {
-			message.innerText = text
-		}
-
-		if (timeout > 0) {
-			const text_node = document.createTextNode('')
-			message.appendChild(text_node)
-
-			setTimeout(() => {
-				if (text_node.parentNode == message) {
-					message.innerText = '( ・∀・)'
-				}
-			}, timeout * 1000)
-		}
-	}
-
-	function loop_message(texts: string[], second = 0.5) {
-		message.innerText = texts[0]
-
-		const text_node = document.createTextNode('')
-		message.appendChild(text_node)
-
-		let id: number, i = 0
-
-		id = setInterval(() => {
-			i++
-			i %= texts.length
-
-			if (text_node.parentNode !== message) {
-				clearInterval(id)
-			} else {
-				message.innerText = texts[i]
-				message.appendChild(text_node)
-			}
-		}, second * 1000)
-	}
+	const session_cache = new SessionCache()
 
 	async function process() {
 		if (onnx_runner.running) {
@@ -1011,14 +970,14 @@ function onLoaded() {
 			return
 		}
 
-		const settings = currentSettings
+		const settings = {...currentSettings}
 
 		const [arch, style] = settings.model_name.split('.')
 		let method: string
 
 		if (settings.scale == 1n) {
 			if (settings.noise == -1n) {
-				set_message('(・A・) No Noise Reduction selected!')
+				//set_message('(・A・) No Noise Reduction selected!')
 				return
 			}
 
@@ -1034,7 +993,7 @@ function onLoaded() {
 		const config = Models.get_model(arch, style, method)
 
 		if (config == null) {
-			set_message('(・A・) Model Not found!')
+			//set_message('(・A・) Model Not found!')
 			return
 		}
 
@@ -1043,48 +1002,24 @@ function onLoaded() {
 		const alpha_config = has_alpha ? Models.get_model(arch, style, /scale\d+x/.exec(method)?.[0] ?? 'scale1x') : null
 
 		if (has_alpha && !alpha_config) {
-			set_message('(・A・) Alpha Model Not found!')
+			//set_message('(・A・) Alpha Model Not found!')
 			return
 		}
 
-		set_message('(・∀・)φ ... ', -1)
+		//set_message('(・∀・)φ ... ', -1)
 
-		dest.style.width = 'auto'
-		dest.style.height = 'auto'
 		loop_btn.disabled = true
 
-		const formatTime = (secs: number) => `${Math.floor(secs / 60).toString(10).padStart(2, '0')}:${Math.floor(secs % 60).toString(10).padStart(2, '0')}`
-		const start = performance.now()
-
-		await onnx_runner.tiled_render(image_data, config, alpha_config, settings, dest, (progress, max_progress, processing) => {
-			const now = performance.now()
-			const spent = (now - start) / 1000
-			const eta = (max_progress - progress) / progress * spent
-
-			if (processing) {
-				let progress_message = `(${progress}/${max_progress})`
-
-				if (progress > 0) {
-					progress_message += `- ${formatTime(spent)} spent - ${formatTime(eta)} remaining`
-				}
-
-				loop_message(['( ・∀・)' + (progress % 2 == 0 ? 'φ　 ' : ' φ　') + progress_message, '( ・∀・)' + (progress % 2 != 0 ? 'φ　 ' : ' φ　') + progress_message], 0.5)
-			} else {
-				set_message('(・A・)!!', 1)
-			}
-		})
+		await onnx_runner.tiled_render(session_cache, image_data, config, alpha_config, settings, dest)
 
 		if (!onnx_runner.stop_flag) {
-			const end = performance.now()
-			const total = (end - start) / 1000
-
 			dest.toBlob((blob) => {
 				if (blob != null) {
 					const url = URL.createObjectURL(blob)
 					const download_filename = (filename.split(/(?=\.[^.]+$)/))[0] + '_waifu2x_' + method + '.png'
-					set_message(`( ・∀・)つ　<a href="${url}" download="${download_filename}">Download</a> - took ${formatTime(total)} (${Math.ceil(total * 1000)}ms)`, -1, true)
+					//set_message(`( ・∀・)つ　<a href="${url}" download="${download_filename}">Download</a>`, -1, true)
 				} else {
-					set_message('(・A・)!! Failed to download !!')
+					//set_message('(・A・)!! Failed to download !!')
 				}
 
 				loop_btn.disabled = false
@@ -1096,7 +1031,7 @@ function onLoaded() {
 		if (filePicker.value !== '') {
 			await process()
 		} else {
-			set_message('(ﾟ∀ﾟ) No Image Found')
+			//set_message('(ﾟ∀ﾟ) No Image Found')
 		}
 	})
 
@@ -1218,11 +1153,5 @@ function onLoaded() {
 				save_settings()
 			})
 		}
-	})
-
-	window.addEventListener('unhandledrejection', function(e) {
-		set_message('(-_-) Error: ' + e.reason, -1)
-		onnx_runner.running = false
-		onnx_runner.stop_flag = false
 	})
 }
