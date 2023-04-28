@@ -1,10 +1,3 @@
-// noinspection DuplicatedCode
-
-// @ts-ignore
-import type * as ort from 'onnxruntime-common'
-
-declare const ort: typeof import('onnxruntime-common')
-
 interface ModelConfig {
 	scale: bigint
 	offset: bigint
@@ -25,7 +18,7 @@ interface Models {
 	[arch: string]: ModelStyles
 }
 
-const CONFIG = {
+const Models = {
 	models: (() => {
 		const models: Models = {}
 
@@ -111,7 +104,7 @@ const CONFIG = {
 				}
 			}
 
-			for (let i = 0; i < 4; ++i) {
+			for (let i = 0; i < 4; i++) {
 				art[`noise${i}_scale2x`] = {
 					...template,
 					scale: 2n,
@@ -131,7 +124,7 @@ const CONFIG = {
 		return models
 	})(),
 
-	get_model_parameters(arch: string, style: string, method: string): ModelConfig | null {
+	get_parameters(arch: string, style: string, method: string): ModelConfig | null {
 		const config = this.models[arch]?.[style]?.[method] ?? null
 
 		if (config !== null) {
@@ -143,21 +136,7 @@ const CONFIG = {
 		return null
 	},
 
-	get_helper_model_path: (name: string) => `models/utils/${name}.onnx`
-}
-
-const OnnxSessionsCache = {
-	sessions: {} as {[path: string]: Promise<ort.InferenceSession>},
-
-	async get_or_create(path: string) {
-		return await (this.sessions[path] ?? (this.sessions[path] = ort.InferenceSession.create(path, {
-			executionProviders: ['wasm']
-		})))
-	},
-
-	get_or_create_helper(name: string) {
-		return this.get_or_create(CONFIG.get_helper_model_path(name))
-	}
+	get_utility_path: (name: string) => `models/utils/${name}.onnx`
 }
 
 const BLEND_SIZE = 16n
@@ -169,164 +148,203 @@ interface Padding {
 	bottom: bigint
 }
 
-interface TilingParameters {
-	output_tile_height: bigint
-	output_tile_width: bigint
-	input_offset: bigint
-	input_blend_size: bigint
-	input_tile_step: bigint
-	output_tile_step: bigint
-	num_h_blocks: bigint
-	num_w_blocks: bigint
-	output_buffer_h: number
-	output_buffer_w: number
-	padding: Padding
+interface TileParameters {
+	col: bigint
+	row: bigint
+
+	in_x: bigint
+	in_y: bigint
+	in_w: bigint
+	in_h: bigint
+
+	out_x: bigint
+	out_y: bigint
+	out_w: bigint
+	out_h: bigint
 }
 
-function assert(condition: boolean, message: string): asserts condition {
-	if (!condition) throw new Error(message)
-}
+class TilingParameters {
+	public readonly scale: bigint
+	public readonly offset: bigint
+	public readonly tile_size: bigint
+	public readonly blend_size: bigint
+	public readonly output_tile_height: bigint
+	public readonly output_tile_width: bigint
+	public readonly input_offset: bigint
+	public readonly input_blend_size: bigint
+	public readonly input_tile_step: bigint
+	public readonly output_tile_step: bigint
+	public readonly num_h_blocks: bigint
+	public readonly num_w_blocks: bigint
+	public readonly output_buffer_h: number
+	public readonly output_buffer_w: number
+	public readonly padding: Padding
 
-function assertNonNull<T>(thing: T): asserts thing is NonNullable<T> {
-	assert(thing !== null && thing !== undefined, 'unexpected null value')
-}
-
-const SeamBlending = class {
-	private readonly dims: readonly number[]
-	private readonly scale: bigint
-	private readonly offset: bigint
-	private readonly tile_size: bigint
-	private readonly blend_size: bigint
-
-	private params?: TilingParameters
-	private pixels?: ort.TypedTensor<'float32'>
-	private weights?: ort.TypedTensor<'float32'>
-	private blend_filter?: ort.TypedTensor<'float32'>
-	private output?: ort.TypedTensor<'float32'>
-
-	constructor(dims: readonly number[], scale: bigint, offset: bigint, tile_size: bigint, blend_size = BLEND_SIZE) {
-		this.dims = dims
+	public constructor(input_width: bigint, input_height: bigint, scale: bigint, offset: bigint, tile_size: bigint, blend_size: bigint = BLEND_SIZE) {
 		this.scale = scale
 		this.offset = offset
 		this.tile_size = tile_size
 		this.blend_size = blend_size
-	}
 
-	static calc_parameters(dims: readonly number[], scale: bigint, offset: bigint, tile_size: bigint, blend_size: bigint): TilingParameters {
-		let p: Partial<TilingParameters> = {}
-
-		const [, , x_h, x_w] = dims.map(BigInt)
-		p.output_tile_height = x_h * scale
-		p.output_tile_width = x_w * scale
-		p.input_offset = (offset + scale - 1n) / scale
-		p.input_blend_size = (blend_size + scale - 1n) / scale
-		p.input_tile_step = tile_size - (p.input_offset * 2n + p.input_blend_size)
-		p.output_tile_step = p.input_tile_step * scale
+		this.output_tile_height = input_height * scale
+		this.output_tile_width = input_width * scale
+		this.input_offset = (offset + scale - 1n) / scale
+		this.input_blend_size = (blend_size + scale - 1n) / scale
+		this.input_tile_step = tile_size - (this.input_offset * 2n + this.input_blend_size)
+		this.output_tile_step = this.input_tile_step * scale
 
 		let [h_blocks, w_blocks, input_h, input_w] = [0n, 0n, 0n, 0n]
 
-		while (input_h < x_h + p.input_offset * 2n) {
-			input_h = h_blocks * p.input_tile_step + tile_size
+		while (input_h < input_height + this.input_offset * 2n) {
+			input_h = h_blocks * this.input_tile_step + tile_size
 			++h_blocks
 		}
 
-		while (input_w < x_w + p.input_offset * 2n) {
-			input_w = w_blocks * p.input_tile_step + tile_size
+		while (input_w < input_width + this.input_offset * 2n) {
+			input_w = w_blocks * this.input_tile_step + tile_size
 			++w_blocks
 		}
 
-		p.num_h_blocks = h_blocks
-		p.num_w_blocks = w_blocks
-		p.output_buffer_h = Number(input_h * scale)
-		p.output_buffer_w = Number(input_w * scale)
+		this.num_h_blocks = h_blocks
+		this.num_w_blocks = w_blocks
+		this.output_buffer_h = Number(input_h * scale)
+		this.output_buffer_w = Number(input_w * scale)
 
-		p.padding = {
-			left: BigInt(p.input_offset),
-			right: BigInt(input_w - (x_w + p.input_offset)),
-			top: BigInt(p.input_offset),
-			bottom: BigInt(input_h - (x_h + p.input_offset))
+		this.padding = {
+			left: BigInt(this.input_offset),
+			right: BigInt(input_w - (input_width + this.input_offset)),
+			top: BigInt(this.input_offset),
+			bottom: BigInt(input_h - (input_height + this.input_offset))
 		}
-
-		return p as TilingParameters
 	}
 
-	private static async create_seam_blending_filter(scale: bigint, offset: bigint, tile_size: bigint): Promise<ort.TypedTensor<'float32'>> {
-		const model = await OnnxSessionsCache.get_or_create_helper('create_seam_blending_filter')
+// for (let h_i = 0n; h_i < num_h_blocks; h_i++) {
+// 	for (let w_i = 0n; w_i < num_w_blocks; w_i++) {
+// 		const h_in = h_i * input_tile_step
+// 		const w_in = w_i * input_tile_step
+// 		const h_out = h_i * output_tile_step
+// 		const w_out = w_i * output_tile_step
+// 		tiles.push([h_in, w_in, h_out, w_out, h_i, w_i] as const)
+// 	}
+// }
 
-		let out = await model.run({
-			scale: new ort.Tensor('int64', BigInt64Array.from([scale]), []),
-			offset: new ort.Tensor('int64', BigInt64Array.from([offset]), []),
-			tile_size: new ort.Tensor('int64', BigInt64Array.from([tile_size]), [])
+	public get_tile_params(row: bigint, col: bigint): TileParameters {
+		return {
+			col,
+			row,
+
+			in_x: col * this.input_tile_step,
+			in_y: row * this.input_tile_step,
+			in_w: this.tile_size,
+			in_h: this.tile_size,
+
+			out_x: col * this.output_tile_step,
+			out_y: row * this.output_tile_step,
+			out_w: this.tile_size * this.scale,
+			out_h: this.tile_size * this.scale
+		}
+	}
+}
+
+class SeamBlender {
+	private constructor(
+		private readonly params: TilingParameters,
+		private readonly image_pixels: ort.TypedTensor<'float32'>,
+		private readonly image_weights: ort.TypedTensor<'float32'>,
+		private readonly tile_filter: ort.TypedTensor<'float32'>,
+		private readonly tile_pixels: ort.TypedTensor<'float32'>
+	) {}
+
+	public static async create(params: TilingParameters) {
+		const {output_buffer_h, output_buffer_w, scale, offset, tile_size} = params
+		const tile_filter_promise = SeamBlender.create_tile_filter(scale, offset, tile_size)
+		const image_pixels = new ort.Tensor('float32', new Float32Array(output_buffer_h * output_buffer_w * 3), [3, output_buffer_h, output_buffer_w])
+		const image_weights = new ort.Tensor('float32', new Float32Array(output_buffer_h * output_buffer_w * 3), [3, output_buffer_h, output_buffer_w])
+		const tile_filter = await tile_filter_promise
+		const tile_pixels = new ort.Tensor('float32', new Float32Array(tile_filter.data.length), tile_filter.dims)
+		return new SeamBlender(params, image_pixels, image_weights, tile_filter, tile_pixels)
+	}
+
+	private static async create_tile_filter(scale: bigint, offset: bigint, tile_size: bigint) {
+		const model_promise = OnnxSessionsCache.get_or_create_helper('create_seam_blending_filter')
+		const scale_tensor = new ort.Tensor('int64', BigInt64Array.from([scale]), [])
+		const offset_tensor = new ort.Tensor('int64', BigInt64Array.from([offset]), [])
+		const tile_size_tensor = new ort.Tensor('int64', BigInt64Array.from([tile_size]), [])
+		const result = await (await model_promise).run({
+			scale: scale_tensor,
+			offset: offset_tensor,
+			tile_size: tile_size_tensor
 		})
 
-		return out.y as ort.TypedTensor<'float32'>
+		return result.y as ort.TypedTensor<'float32'>
 	}
 
-	async build() {
-		this.params = SeamBlending.calc_parameters(this.dims, this.scale, this.offset, this.tile_size, this.blend_size)
-		this.pixels = new ort.Tensor('float32', new Float32Array(this.params.output_buffer_h * this.params.output_buffer_w * 3), [3, this.params.output_buffer_h, this.params.output_buffer_w])
-		this.weights = new ort.Tensor('float32', new Float32Array(this.params.output_buffer_h * this.params.output_buffer_w * 3), [3, this.params.output_buffer_h, this.params.output_buffer_w])
-		this.blend_filter = await SeamBlending.create_seam_blending_filter(this.scale, this.offset, this.tile_size)
-		this.output = new ort.Tensor('float32', new Float32Array(this.blend_filter.data.length), this.blend_filter.dims)
-	}
-
-	update(tile: ort.TypedTensor<'float32'>, tile_y: bigint, tile_x: bigint) {
-		const [, tile_h, tile_w] = this.output!.dims
+	public blend(tile: ort.TypedTensor<'float32'>, tile_x: bigint, tile_y: bigint) {
+		const [, tile_h, tile_w] = this.tile_pixels!.dims
 		const tile_size = tile_w * tile_h
 
-		const [, buffer_h, buffer_w] = this.pixels!.dims
-		const buffer_size = buffer_w * buffer_h
+		const [, image_h, image_w] = this.image_pixels!.dims
+		const image_size = image_w * image_h
 
 		const step_size = this.params!.output_tile_step
 		const [output_tile_x, output_tile_y] = [step_size * tile_x, step_size * tile_y].map(Number)
 
-		const blend_filter_data = this.blend_filter!.data
 		const tile_data = tile.data
-		const output_data = this.output!.data
-		const weights_data = this.weights!.data
-		const pixels_data = this.pixels!.data
+		const tile_filter_data = this.tile_filter!.data
+		const tile_pixels_data = this.tile_pixels!.data
+		const image_weights_data = this.image_weights!.data
+		const image_pixels_data = this.image_pixels!.data
 
 		for (let channel = 0; channel < 3; channel++) {
 			const tile_offset = channel * tile_size
-			const buffer_offset = channel * buffer_size
+			const image_offset = channel * image_size
 
-			const blend_filter_channel = blend_filter_data.subarray(tile_offset)
 			const tile_channel = tile_data.subarray(tile_offset)
-			const output_channel = output_data.subarray(tile_offset)
-			const weights_channel = weights_data.subarray(buffer_offset)
-			const pixels_channel = pixels_data.subarray(buffer_offset)
+			const tile_filter_channel = tile_filter_data.subarray(tile_offset)
+			const tile_pixels_channel = tile_pixels_data.subarray(tile_offset)
+			const image_weights_channel = image_weights_data.subarray(image_offset)
+			const image_pixels_channel = image_pixels_data.subarray(image_offset)
 
 			for (let filter_y = 0; filter_y < tile_h; filter_y++) {
 				const tile_offset = filter_y * tile_w
-				const buffer_offset = (output_tile_y + filter_y) * buffer_w + output_tile_x
+				const image_offset = (output_tile_y + filter_y) * image_w + output_tile_x
 
 				for (let filter_x = 0; filter_x < tile_w; filter_x++) {
 					const tile_index = tile_offset + filter_x
-					const buffer_index = buffer_offset + filter_x
+					const image_index = image_offset + filter_x
 
-					const old_factor = weights_channel[buffer_index] / (weights_channel[buffer_index] += blend_filter_channel[tile_index])
-					output_channel[tile_index] = pixels_channel[buffer_index] = (pixels_channel[buffer_index] * old_factor + tile_channel[tile_index] * (1 - old_factor))
+					const old_factor = image_weights_channel[image_index] / (image_weights_channel[image_index] += tile_filter_channel[tile_index])
+					tile_pixels_channel[tile_index] = image_pixels_channel[image_index] = (image_pixels_channel[image_index] * old_factor + tile_channel[tile_index] * (1 - old_factor))
 				}
 			}
 		}
 
-		return this.output!
-	}
-
-	get_parameters() {
-		assertNonNull(this.params)
-		return this.params
+		return this.tile_pixels
 	}
 }
 
 interface SettingsSnapshot {
-	model_name: 'swin_unet.art' | 'swin_unet.photo' | 'cunet',
-	noise: -1n | 0n | 1n | 2n | 3n,
-	scale: 1n | 2n | 4n,
-	tile_size: bigint,
-	tile_random: boolean,
-	tta_level: 0n | 2n | 4n,
+	model_name: 'swin_unet.art' | 'swin_unet.photo' | 'cunet'
+	noise: -1n | 0n | 1n | 2n | 3n
+	scale: 1n | 2n | 4n
+	tile_size: bigint
+	tile_random: boolean
+	tta_level: 0n | 2n | 4n
 	detect_alpha: boolean
+}
+
+const OnnxSessionsCache = {
+	sessions: {} as {[path: string]: ReturnType<typeof ort.InferenceSession.create>},
+
+	async get_or_create(path: string) {
+		return await (this.sessions[path] ?? (this.sessions[path] = ort.InferenceSession.create(path, {
+			executionProviders: ['wasm']
+		})))
+	},
+
+	get_or_create_helper(name: string) {
+		return this.get_or_create(Models.get_utility_path(name))
+	}
 }
 
 const onnx_runner = {
@@ -438,13 +456,6 @@ const onnx_runner = {
 		] as const
 	},
 
-	shuffleArray(array: any[]) {
-		for (let i = array.length - 1; i > 0; i--) {
-			const j = Math.floor(Math.random() * (i + 1));
-			[array[i], array[j]] = [array[j], array[i]]
-		}
-	},
-
 	async tiled_render(
 		image_data: ImageData,
 		model_config: ModelConfig,
@@ -469,17 +480,19 @@ const onnx_runner = {
 		output_canvas.height = Number(BigInt(image_data.height) * model_config.scale)
 
 		const model = await OnnxSessionsCache.get_or_create(model_config.path)
-		const alpha_model = alpha_config != null ? await OnnxSessionsCache.get_or_create(alpha_config.path) : null
-		const has_alpha = alpha_model != null
+		const has_alpha = alpha_config != null
+		const alpha_model = has_alpha ? await OnnxSessionsCache.get_or_create(alpha_config.path) : null
 
-		const seam_blending = new SeamBlending([1, 3, image_data.height, image_data.width], model_config.scale, model_config.offset, settings.tile_size)
-		const seam_blending_alpha = has_alpha ? new SeamBlending([1, 3, image_data.height, image_data.width], model_config.scale, model_config.offset, settings.tile_size) : null
-		await Promise.all([seam_blending.build(), seam_blending_alpha?.build()])
+		const params = new TilingParameters(BigInt(image_data.width), BigInt(image_data.height), model_config.scale, model_config.offset, settings.tile_size)
+
+		const [blender, alpha_blender] = await Promise.all([SeamBlender.create(params), has_alpha ? SeamBlender.create(params) : null])
 
 		const [rgb, alpha1, alpha3] = this.to_input(image_data.data, image_data.width, image_data.height, has_alpha)
-		const {padding, num_h_blocks, num_w_blocks, input_tile_step, output_tile_step} = seam_blending.get_parameters()
-		const rgb_padded = await this.padding(alpha1 ? await this.alpha_border_padding(rgb, alpha1, model_config.offset) : rgb, padding)
+		const {padding} = params
+
+		// noinspection ES6MissingAwait
 		const alpha3_padded = alpha3 ? await this.padding(alpha3, padding) : null
+		const rgb_padded = await this.padding(alpha1 ? await this.alpha_border_padding(rgb, alpha1, model_config.offset) : rgb, padding)
 
 		const [, , h_padded, w_padded] = rgb_padded.dims
 		const input_canvas = document.createElement('canvas')
@@ -488,38 +501,36 @@ const onnx_runner = {
 		input_canvas.height = h_padded
 		input_ctx.putImageData(this.to_image_data(rgb_padded.data, alpha3_padded?.data ?? null, w_padded, h_padded), 0, 0)
 
-		const all_blocks = num_h_blocks * num_w_blocks
+		const all_blocks = params.num_w_blocks * params.num_h_blocks
 		let progress = 0
 
 		console.time('render')
 
 		const tiles = []
-		for (let h_i = 0n; h_i < num_h_blocks; h_i++) {
-			for (let w_i = 0n; w_i < num_w_blocks; w_i++) {
-				const h_in = h_i * input_tile_step
-				const w_in = w_i * input_tile_step
-				const h_out = h_i * output_tile_step
-				const w_out = w_i * output_tile_step
-				tiles.push([h_in, w_in, h_out, w_out, h_i, w_i] as const)
+		for (let row = 0n; row < params.num_h_blocks; row++) {
+			for (let col = 0n; col < params.num_w_blocks; col++) {
+				tiles.push([row, col] as const)
 			}
 		}
 
-		if (settings.tile_random) this.shuffleArray(tiles)
-
 		block_callback(0, Number(all_blocks), true)
 
-		for (let k = 0; k < tiles.length; ++k) {
+		while (tiles.length > 0) {
 			let tile: ort.TypedTensor<'float32'>,
 			    tile_alpha: ort.TypedTensor<'float32'> | null
 
-			const [h_in, w_in, h_out, w_out, h_i, w_i] = tiles[k]
-			const tile_image_data = input_ctx.getImageData(Number(w_in), Number(h_in), Number(settings.tile_size), Number(settings.tile_size))
+			const [[row, col]] = tiles.splice(settings.tile_random ? Math.floor(Math.random() * tiles.length) : 0, 1)
+			const tile_params = params.get_tile_params(row, col)
+			const tile_image_data = input_ctx.getImageData(Number(tile_params.in_x), Number(tile_params.in_y), Number(tile_params.in_w), Number(tile_params.in_h))
 			const single_color = this.is_solid_color(tile_image_data.data, has_alpha)
 
 			if (single_color) {
 				[tile, tile_alpha] = this.create_solid_color_tensor(single_color, Number(settings.tile_size * model_config.scale - model_config.offset * 2n))
 			} else {
 				[tile, , tile_alpha] = this.to_input(tile_image_data.data, tile_image_data.width, tile_image_data.height, has_alpha)
+
+				// noinspection ES6MissingAwait
+				const tile_alpha_promise = alpha_model && tile_alpha ? alpha_model.run({x: tile_alpha}) : null
 
 				if (settings.tta_level > 0) {
 					tile = await this.tta_split(tile, BigInt(settings.tta_level))
@@ -531,16 +542,14 @@ const onnx_runner = {
 					tile = await this.tta_merge(tile, BigInt(settings.tta_level))
 				}
 
-				if (alpha_model && tile_alpha) {
-					tile_alpha = (await alpha_model.run({x: tile_alpha})).y as ort.TypedTensor<'float32'>
-				}
+				tile_alpha = ((await tile_alpha_promise)?.y ?? null) as ort.TypedTensor<'float32'> | null
 			}
 
-			const rgb = seam_blending.update(tile, h_i, w_i)
-			const alpha = seam_blending_alpha && tile_alpha ? seam_blending_alpha.update(tile_alpha, h_i, w_i) : null
+			const rgb = blender.blend(tile, tile_params.col, tile_params.row)
+			const alpha = alpha_blender && tile_alpha ? alpha_blender.blend(tile_alpha, tile_params.col, tile_params.row) : null
 			const output_image_data = this.to_image_data(rgb.data, alpha?.data ?? null, tile.dims[3], tile.dims[2])
 
-			output_ctx.putImageData(output_image_data, Number(w_out), Number(h_out))
+			output_ctx.putImageData(output_image_data, Number(tile_params.out_x), Number(tile_params.out_y))
 			progress++
 
 			if (this.stop_flag) {
@@ -655,10 +664,6 @@ function onLoaded() {
 	const src_ctx = src.getContext('2d', {willReadFrequently: true})!
 	const dest = document.getElementById('dest') as HTMLCanvasElement
 
-	const start = document.getElementById('start') as HTMLButtonElement
-	const stop = document.getElementById('stop') as HTMLButtonElement
-	const feedback = document.getElementById('feedback') as HTMLButtonElement
-
 	src.addEventListener('click', () => {
 		if (src.style.height === 'auto') {
 			src.style.width = `auto`
@@ -679,8 +684,12 @@ function onLoaded() {
 		}
 	})
 
+	const start_btn = document.getElementById('start') as HTMLButtonElement
+	const stop_btn = document.getElementById('stop') as HTMLButtonElement
+	const loop_btn = document.getElementById('loop_btn') as HTMLButtonElement
+
 	function set_input_image(file: File) {
-		const feedbackWasDisabled = feedback.disabled
+		const feedbackWasDisabled = loop_btn.disabled
 		const reader = new FileReader()
 
 		reader.addEventListener('load', () => {
@@ -694,13 +703,13 @@ function onLoaded() {
 				src.style.width = 'auto'
 				filename = file.name
 
-				start.disabled = false
-				feedback.disabled = feedbackWasDisabled
+				start_btn.disabled = false
+				loop_btn.disabled = feedbackWasDisabled
 			})
 		})
 
-		start.disabled = true
-		feedback.disabled = true
+		start_btn.disabled = true
+		loop_btn.disabled = true
 		reader.readAsDataURL(file)
 	}
 
@@ -758,95 +767,6 @@ function onLoaded() {
 		}
 	})
 
-	async function process() {
-		if (onnx_runner.running) {
-			console.log('Already running')
-			return
-		}
-
-		const settings = currentSettings
-
-		const [arch, style] = settings.model_name.split('.')
-		let method: string
-
-		if (settings.scale == 1n) {
-			if (settings.noise == -1n) {
-				set_message('(・A・) No Noise Reduction selected!')
-				return
-			}
-
-			method = `noise${settings.noise}`
-		} else {
-			if (settings.noise == -1n) {
-				method = `scale${settings.scale}x`
-			} else {
-				method = `noise${settings.noise}_scale${settings.scale}x`
-			}
-		}
-
-		const config = CONFIG.get_model_parameters(arch, style, method)
-
-		if (config == null) {
-			set_message('(・A・) Model Not found!')
-			return
-		}
-
-		const image_data = src_ctx.getImageData(0, 0, src.width, src.height)
-		const has_alpha = !settings.detect_alpha ? false : onnx_runner.has_transparency(image_data.data)
-		const alpha_config = has_alpha ? CONFIG.get_model_parameters(arch, style, /scale\d+x/.exec(method)?.[0] ?? 'scale1x') : null
-
-		if (has_alpha && !alpha_config) {
-			set_message('(・A・) Alpha Model Not found!')
-			return
-		}
-
-		set_message('(・∀・)φ ... ', -1)
-
-		dest.style.width = 'auto'
-		dest.style.height = 'auto'
-		feedback.disabled = true
-
-		const tile_size = config.round_tile_size(settings.tile_size)
-
-		const formatTime = (secs: number) => `${Math.floor(secs / 60).toString(10).padStart(2, '0')}:${Math.floor(secs % 60).toString(10).padStart(2, '0')}`
-		const start = performance.now()
-
-		await onnx_runner.tiled_render(image_data, config, alpha_config, {...settings, tile_size}, dest, (progress, max_progress, processing) => {
-			const now = performance.now()
-			const spent = (now - start) / 1000
-			const eta = (max_progress - progress) / progress * spent
-
-			if (processing) {
-				let progress_message = `(${progress}/${max_progress})`
-
-				if (progress > 0) {
-					progress_message += `- ${formatTime(spent)} spent - ${formatTime(eta)} remaining`
-				}
-
-				loop_message(['( ・∀・)' + (progress % 2 == 0 ? 'φ　 ' : ' φ　') + progress_message, '( ・∀・)' + (progress % 2 != 0 ? 'φ　 ' : ' φ　') + progress_message], 0.5)
-			} else {
-				set_message('(・A・)!!', 1)
-			}
-		})
-
-		if (!onnx_runner.stop_flag) {
-			const end = performance.now()
-			const total = (end - start) / 1000
-
-			dest.toBlob((blob) => {
-				if (blob != null) {
-					const url = URL.createObjectURL(blob)
-					const download_filename = (filename.split(/(?=\.[^.]+$)/))[0] + '_waifu2x_' + method + '.png'
-					set_message(`( ・∀・)つ　<a href="${url}" download="${download_filename}">Download</a> - took ${formatTime(total)} (${Math.ceil(total * 1000)}ms)`, -1, true)
-				} else {
-					set_message('(・A・)!! Failed to download !!')
-				}
-
-				feedback.disabled = false
-			}, 'image/png')
-		}
-	}
-
 	const message = document.getElementById('message')!
 
 	function set_message(text: string, timeout = 2, html = false) {
@@ -889,7 +809,96 @@ function onLoaded() {
 		}, second * 1000)
 	}
 
-	start.addEventListener('click', async () => {
+	async function process() {
+		if (onnx_runner.running) {
+			console.log('Already running')
+			return
+		}
+
+		const settings = currentSettings
+
+		const [arch, style] = settings.model_name.split('.')
+		let method: string
+
+		if (settings.scale == 1n) {
+			if (settings.noise == -1n) {
+				set_message('(・A・) No Noise Reduction selected!')
+				return
+			}
+
+			method = `noise${settings.noise}`
+		} else {
+			if (settings.noise == -1n) {
+				method = `scale${settings.scale}x`
+			} else {
+				method = `noise${settings.noise}_scale${settings.scale}x`
+			}
+		}
+
+		const config = Models.get_parameters(arch, style, method)
+
+		if (config == null) {
+			set_message('(・A・) Model Not found!')
+			return
+		}
+
+		const image_data = src_ctx.getImageData(0, 0, src.width, src.height)
+		const has_alpha = !settings.detect_alpha ? false : onnx_runner.has_transparency(image_data.data)
+		const alpha_config = has_alpha ? Models.get_parameters(arch, style, /scale\d+x/.exec(method)?.[0] ?? 'scale1x') : null
+
+		if (has_alpha && !alpha_config) {
+			set_message('(・A・) Alpha Model Not found!')
+			return
+		}
+
+		set_message('(・∀・)φ ... ', -1)
+
+		dest.style.width = 'auto'
+		dest.style.height = 'auto'
+		loop_btn.disabled = true
+
+		const tile_size = config.round_tile_size(settings.tile_size)
+
+		const formatTime = (secs: number) => `${Math.floor(secs / 60).toString(10).padStart(2, '0')}:${Math.floor(secs % 60).toString(10).padStart(2, '0')}`
+		const start = performance.now()
+
+		await onnx_runner.tiled_render(image_data, config, alpha_config, {...settings, tile_size}, dest, (progress, max_progress, processing) => {
+			const now = performance.now()
+			const spent = (now - start) / 1000
+			const eta = (max_progress - progress) / progress * spent
+
+			if (processing) {
+				let progress_message = `(${progress}/${max_progress})`
+
+				if (progress > 0) {
+					progress_message += `- ${formatTime(spent)} spent - ${formatTime(eta)} remaining`
+				}
+
+				loop_message(['( ・∀・)' + (progress % 2 == 0 ? 'φ　 ' : ' φ　') + progress_message, '( ・∀・)' + (progress % 2 != 0 ? 'φ　 ' : ' φ　') + progress_message], 0.5)
+			} else {
+				set_message('(・A・)!!', 1)
+			}
+		})
+
+		if (!onnx_runner.stop_flag) {
+			const end = performance.now()
+			const total = (end - start) / 1000
+
+			dest.toBlob((blob) => {
+				if (blob != null) {
+					const url = URL.createObjectURL(blob)
+					const download_filename = (filename.split(/(?=\.[^.]+$)/))[0] + '_waifu2x_' + method + '.png'
+					set_message(`( ・∀・)つ　<a href="${url}" download="${download_filename}">Download</a> - took ${formatTime(total)} (${Math.ceil(total * 1000)}ms)`, -1, true)
+				} else {
+					set_message('(・A・)!! Failed to download !!')
+				}
+
+				loop_btn.disabled = false
+			}, 'image/png')
+		}
+	}
+
+	start_btn.addEventListener('click', async () => {
 		if (filePicker.value !== '') {
 			await process()
 		} else {
@@ -897,12 +906,12 @@ function onLoaded() {
 		}
 	})
 
-	stop.addEventListener('click', () => {
+	stop_btn.addEventListener('click', () => {
 		onnx_runner.stop_flag = true
 	})
 
-	feedback.addEventListener('click', () => {
-		feedback.disabled = true
+	loop_btn.addEventListener('click', () => {
+		loop_btn.disabled = true
 		filePicker.files = null
 		src.width = dest.width
 		src.height = dest.height

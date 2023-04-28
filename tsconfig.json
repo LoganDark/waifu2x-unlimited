@@ -9,8 +9,7 @@
 			"*": ["modules/*"]
 		},
 		"moduleResolution": "Node",
-		"isolatedModules": true,
 		"strict": true
 	},
-	"files": ["script.ts"]
+	"files": ["ort.d.ts", "script.ts"]
 }
