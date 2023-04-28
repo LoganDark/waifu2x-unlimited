@@ -124,22 +124,197 @@ const Models = {
 		return models
 	})(),
 
-	get_parameters(arch: string, style: string, method: string): ModelConfig | null {
+	get_model(arch: string, style: string, method: string): ModelConfig | null {
 		const config = this.models[arch]?.[style]?.[method] ?? null
 
 		if (config !== null) {
 			config.path = `models/${arch}/${style}/${method}.onnx`
-
 			return config as ModelConfig
 		}
 
 		return null
 	},
 
-	get_utility_path: (name: string) => `models/utils/${name}.onnx`
+	create: (path: string) => ort.InferenceSession.create(path, {executionProviders: ['wasm']}),
+	get_helper_path: (name: string) => `models/utils/${name}.onnx`,
+	create_helper: (name: string) => Models.create(Models.get_helper_path(name)),
+
+	image_into_tensors: (rgb: Float32Array, alpha1: Float32Array, data: Uint8ClampedArray, width: number, height: number) => {
+		const len = width * height
+
+		for (let offset = 0; offset < len; offset += width) {
+			for (let x = 0; x < width; x++) {
+				const i = offset + x
+				const i4 = i * 4
+				rgb[i] = data[i4] / 255
+				rgb[i + len] = data[i4 + 1] / 255
+				rgb[i + len * 2] = data[i4 + 2] / 255
+				alpha1[i] = data[i4 + 3] / 255
+			}
+		}
+	},
+
+	image_to_tensors: (() => {
+		function image_to_tensor(data: Uint8ClampedArray, width: number, height: number, keep_alpha: true): readonly [ort.TypedTensor<'float32'>, ort.TypedTensor<'float32'>, ort.TypedTensor<'float32'>]
+		function image_to_tensor(data: Uint8ClampedArray, width: number, height: number, keep_alpha?: false): readonly [ort.TypedTensor<'float32'>, null, null]
+		function image_to_tensor(data: Uint8ClampedArray, width: number, height: number, keep_alpha: boolean): readonly [ort.TypedTensor<'float32'>, ort.TypedTensor<'float32'>, ort.TypedTensor<'float32'>] | readonly [ort.TypedTensor<'float32'>, null, null]
+		function image_to_tensor(data: Uint8ClampedArray, width: number, height: number, keep_alpha: boolean = false) {
+			const len = width * height
+			const rgb = new Float32Array(len * 3)
+			const alpha1 = new Float32Array(len)
+
+			Models.image_into_tensors(rgb, alpha1, data, width, height)
+
+			if (keep_alpha) {
+				const alpha3 = new Float32Array(len * 3)
+				alpha3.set(alpha1)
+				alpha3.set(alpha1, len)
+				alpha3.set(alpha1, len * 2)
+
+				return [
+					new ort.Tensor('float32', rgb, [1, 3, height, width]),
+					new ort.Tensor('float32', alpha1, [1, 1, height, width]),
+					new ort.Tensor('float32', alpha3, [1, 3, height, width])
+				] as const
+			} else {
+				return [
+					new ort.Tensor('float32', rgb, [1, 3, height, width]),
+					null,
+					null
+				] as const
+			}
+		}
+
+		return image_to_tensor
+	})(),
+
+	tensors_into_image_data: (data: Uint8ClampedArray, rgb: Float32Array, alpha3: Float32Array | null, width: number, height: number) => {
+		const len = width * height
+
+		for (let y = 0; y < height; y++) {
+			const offset = y * width
+
+			for (let x = 0; x < width; x++) {
+				const i = offset + x
+				const i4 = i * 4
+				data[i4] = rgb[i] * 255
+				data[i4 + 1] = rgb[i + len] * 255
+				data[i4 + 2] = rgb[i + len * 2] * 255
+				data[i4 + 3] = (alpha3 ? (alpha3[i] + alpha3[i + len] + alpha3[i + len * 2]) / 3 : 1) * 255
+			}
+		}
+	},
+
+	tensors_to_image: (rgb: Float32Array, alpha3: Float32Array | null, width: number, height: number) => {
+		const len = width * height
+		const data = new Uint8ClampedArray(len * 4)
+		Models.tensors_into_image_data(data, rgb, alpha3, width, height)
+		return new ImageData(data, width, height)
+	}
 }
 
 const BLEND_SIZE = 16n
+
+interface SettingsSnapshot {
+	model_name: 'swin_unet.art' | 'swin_unet.photo' | 'cunet'
+	noise: -1n | 0n | 1n | 2n | 3n
+	scale: 1n | 2n | 4n
+	tile_size: bigint
+	tile_random: boolean
+	tta_level: 0n | 2n | 4n
+	detect_alpha: boolean
+}
+
+class UtilityModels {
+	private constructor(
+		private readonly _pad: ort.InferenceSession,
+		private readonly _tta_split: ort.InferenceSession,
+		private readonly _tta_merge: ort.InferenceSession,
+		private readonly _alpha_border_padding: ort.InferenceSession,
+		private readonly _antialias: ort.InferenceSession
+	) {}
+
+	public static async initialize() {
+		const pad = await Models.create_helper('pad')
+		const tta_split = await Models.create_helper('tta_split')
+		const tta_merge = await Models.create_helper('tta_merge')
+		const alpha_border_padding = await Models.create_helper('alpha_border_padding')
+		const antialias = await Models.create_helper('antialias')
+
+		return new UtilityModels(pad, tta_split, tta_merge, alpha_border_padding, antialias)
+	}
+
+	public async pad(rgb: ort.TypedTensor<'float32'>, padding: Padding) {
+		const output = await this._pad.run({
+			x: rgb,
+			left: new ort.Tensor('int64', BigInt64Array.from([padding.left]), []),
+			right: new ort.Tensor('int64', BigInt64Array.from([padding.right]), []),
+			top: new ort.Tensor('int64', BigInt64Array.from([padding.top]), []),
+			bottom: new ort.Tensor('int64', BigInt64Array.from([padding.bottom]), [])
+		})
+
+		return output.y as ort.TypedTensor<'float32'>
+	}
+
+	public async tta_split(rgb: ort.TypedTensor<'float32'>, level: bigint) {
+		const output = await this._tta_split.run({
+			x: rgb,
+			tta_level: new ort.Tensor('int64', BigInt64Array.from([level]), [])
+		})
+
+		return output.y as ort.TypedTensor<'float32'>
+	}
+
+	public async tta_merge(rgb: ort.TypedTensor<'float32'>, level: bigint) {
+		const output = await this._tta_merge.run({
+			x: rgb,
+			tta_level: new ort.Tensor('int64', BigInt64Array.from([level]), [])
+		})
+
+		return output.y as ort.TypedTensor<'float32'>
+	}
+
+	public async pad_alpha_border(rgb: ort.TypedTensor<'float32'>, alpha1: ort.TypedTensor<'float32'>, offset: bigint) {
+		const result = await this._alpha_border_padding.run({
+			rgb: new ort.Tensor('float32', rgb.data, rgb.dims.slice(1)),
+			alpha: new ort.Tensor('float32', alpha1.data, alpha1.dims.slice(1)),
+			offset: new ort.Tensor('int64', BigInt64Array.from([offset]), [])
+		})
+
+		const out_rgb = result.y as ort.TypedTensor<'float32'>
+		return new ort.Tensor('float32', out_rgb.data, [1, ...out_rgb.dims])
+	}
+
+	public async antialias(rgb: ort.TypedTensor<'float32'>) {
+		const result = await this._antialias.run({x: rgb})
+		return result.y as ort.TypedTensor<'float32'>
+	}
+}
+
+class SessionCache {
+	private threads: Map<ModelConfig, Promise<ort.InferenceSession>>[] = []
+
+	public constructor() {}
+
+	public get(config: ModelConfig, shard: number = 0) {
+		const cache = this.threads[shard] = this.threads[shard] ?? new Map()
+		const existing = cache.get(config)
+
+		if (!existing) {
+			const session = Models.create(config.path)
+			cache.set(config, session)
+			return session
+		}
+
+		return existing
+	}
+
+	public delete(config: ModelConfig) {
+		for (const cache of Object.values(this.threads)) {
+			cache.delete(config)
+		}
+	}
+}
 
 interface Padding {
 	left: bigint
@@ -168,12 +343,13 @@ class TilingParameters {
 	public readonly offset: bigint
 	public readonly tile_size: bigint
 	public readonly blend_size: bigint
-	public readonly output_tile_height: bigint
-	public readonly output_tile_width: bigint
+	public readonly output_height: bigint
+	public readonly output_width: bigint
 	public readonly input_offset: bigint
 	public readonly input_blend_size: bigint
 	public readonly input_tile_step: bigint
 	public readonly output_tile_step: bigint
+	public readonly output_tile_size: bigint
 	public readonly num_h_blocks: bigint
 	public readonly num_w_blocks: bigint
 	public readonly output_buffer_h: number
@@ -186,12 +362,13 @@ class TilingParameters {
 		this.tile_size = tile_size
 		this.blend_size = blend_size
 
-		this.output_tile_height = input_height * scale
-		this.output_tile_width = input_width * scale
+		this.output_height = input_height * scale
+		this.output_width = input_width * scale
 		this.input_offset = (offset + scale - 1n) / scale
 		this.input_blend_size = (blend_size + scale - 1n) / scale
 		this.input_tile_step = tile_size - (this.input_offset * 2n + this.input_blend_size)
 		this.output_tile_step = this.input_tile_step * scale
+		this.output_tile_size = tile_size * scale - offset * 2n
 
 		let [h_blocks, w_blocks, input_h, input_w] = [0n, 0n, 0n, 0n]
 
@@ -218,16 +395,6 @@ class TilingParameters {
 		}
 	}
 
-// for (let h_i = 0n; h_i < num_h_blocks; h_i++) {
-// 	for (let w_i = 0n; w_i < num_w_blocks; w_i++) {
-// 		const h_in = h_i * input_tile_step
-// 		const w_in = w_i * input_tile_step
-// 		const h_out = h_i * output_tile_step
-// 		const w_out = w_i * output_tile_step
-// 		tiles.push([h_in, w_in, h_out, w_out, h_i, w_i] as const)
-// 	}
-// }
-
 	public get_tile_params(row: bigint, col: bigint): TileParameters {
 		return {
 			col,
@@ -240,13 +407,40 @@ class TilingParameters {
 
 			out_x: col * this.output_tile_step,
 			out_y: row * this.output_tile_step,
-			out_w: this.tile_size * this.scale,
-			out_h: this.tile_size * this.scale
+			out_w: this.tile_size * this.scale - this.offset * 2n,
+			out_h: this.tile_size * this.scale - this.offset * 2n
 		}
 	}
 }
 
 class SeamBlender {
+	public static Factory = class SeamBlenderFactory {
+		private constructor(private readonly create_seam_blending_filter: ort.InferenceSession) {}
+
+		public static async initialize() {
+			return new SeamBlenderFactory(await Models.create_helper('create_seam_blending_filter'))
+		}
+
+		private static async create_tile_filter(create_seam_blending_filter: ort.InferenceSession, scale: bigint, offset: bigint, tile_size: bigint) {
+			const result = await create_seam_blending_filter.run({
+				scale: new ort.Tensor('int64', BigInt64Array.from([scale]), []),
+				offset: new ort.Tensor('int64', BigInt64Array.from([offset]), []),
+				tile_size: new ort.Tensor('int64', BigInt64Array.from([tile_size]), [])
+			})
+
+			return result.y as ort.TypedTensor<'float32'>
+		}
+
+		public async produce(params: TilingParameters) {
+			const {output_buffer_h, output_buffer_w, scale, offset, tile_size} = params
+			const image_pixels = new ort.Tensor('float32', new Float32Array(output_buffer_h * output_buffer_w * 3), [3, output_buffer_h, output_buffer_w])
+			const image_weights = new ort.Tensor('float32', new Float32Array(output_buffer_h * output_buffer_w * 3), [3, output_buffer_h, output_buffer_w])
+			const tile_filter = await SeamBlenderFactory.create_tile_filter(this.create_seam_blending_filter, scale, offset, tile_size)
+			const tile_pixels = new ort.Tensor('float32', new Float32Array(tile_filter.data.length), tile_filter.dims)
+			return new SeamBlender(params, image_pixels, image_weights, tile_filter, tile_pixels)
+		}
+	}
+
 	private constructor(
 		private readonly params: TilingParameters,
 		private readonly image_pixels: ort.TypedTensor<'float32'>,
@@ -254,30 +448,6 @@ class SeamBlender {
 		private readonly tile_filter: ort.TypedTensor<'float32'>,
 		private readonly tile_pixels: ort.TypedTensor<'float32'>
 	) {}
-
-	public static async create(params: TilingParameters) {
-		const {output_buffer_h, output_buffer_w, scale, offset, tile_size} = params
-		const tile_filter_promise = SeamBlender.create_tile_filter(scale, offset, tile_size)
-		const image_pixels = new ort.Tensor('float32', new Float32Array(output_buffer_h * output_buffer_w * 3), [3, output_buffer_h, output_buffer_w])
-		const image_weights = new ort.Tensor('float32', new Float32Array(output_buffer_h * output_buffer_w * 3), [3, output_buffer_h, output_buffer_w])
-		const tile_filter = await tile_filter_promise
-		const tile_pixels = new ort.Tensor('float32', new Float32Array(tile_filter.data.length), tile_filter.dims)
-		return new SeamBlender(params, image_pixels, image_weights, tile_filter, tile_pixels)
-	}
-
-	private static async create_tile_filter(scale: bigint, offset: bigint, tile_size: bigint) {
-		const model_promise = OnnxSessionsCache.get_or_create_helper('create_seam_blending_filter')
-		const scale_tensor = new ort.Tensor('int64', BigInt64Array.from([scale]), [])
-		const offset_tensor = new ort.Tensor('int64', BigInt64Array.from([offset]), [])
-		const tile_size_tensor = new ort.Tensor('int64', BigInt64Array.from([tile_size]), [])
-		const result = await (await model_promise).run({
-			scale: scale_tensor,
-			offset: offset_tensor,
-			tile_size: tile_size_tensor
-		})
-
-		return result.y as ort.TypedTensor<'float32'>
-	}
 
 	public blend(tile: ort.TypedTensor<'float32'>, tile_x: bigint, tile_y: bigint) {
 		const [, tile_h, tile_w] = this.tile_pixels!.dims
@@ -287,7 +457,8 @@ class SeamBlender {
 		const image_size = image_w * image_h
 
 		const step_size = this.params!.output_tile_step
-		const [output_tile_x, output_tile_y] = [step_size * tile_x, step_size * tile_y].map(Number)
+		const output_tile_x = Number(step_size * tile_x),
+		      output_tile_y = Number(step_size * tile_y)
 
 		const tile_data = tile.data
 		const tile_filter_data = this.tile_filter!.data
@@ -323,90 +494,185 @@ class SeamBlender {
 	}
 }
 
-interface SettingsSnapshot {
-	model_name: 'swin_unet.art' | 'swin_unet.photo' | 'cunet'
-	noise: -1n | 0n | 1n | 2n | 3n
-	scale: 1n | 2n | 4n
-	tile_size: bigint
-	tile_random: boolean
-	tta_level: 0n | 2n | 4n
-	detect_alpha: boolean
+type SeamBlenderFactory = Awaited<ReturnType<typeof SeamBlender.Factory.initialize>>
+
+class TileMapper {
+	public static Factory = class TileMapperFactory {
+		private constructor(
+			private readonly utils: UtilityModels,
+			private readonly session_cache: SessionCache,
+			private readonly blender_factory: SeamBlenderFactory
+		) {}
+
+		public static async initialize() {
+			const utils = await UtilityModels.initialize()
+			const session_cache = new SessionCache()
+			const blender_factory = await SeamBlender.Factory.initialize()
+			return new TileMapperFactory(utils, session_cache, blender_factory)
+		}
+
+		public async create(tile_size: bigint, scale: bigint, offset: bigint, image: ImageData, preprocess_alpha: boolean) {
+			const {utils, session_cache, blender_factory} = this
+
+			const params = new TilingParameters(BigInt(image.width), BigInt(image.height), scale, offset, tile_size)
+
+			if (preprocess_alpha) {
+				const [rgb, alpha1, alpha3] = Models.image_to_tensors(image.data, image.width, image.height, true)
+				const rgb_padded = await utils.pad(await utils.pad_alpha_border(rgb, alpha1, params.offset), params.padding)
+				const alpha3_padded = await utils.pad(alpha3, params.padding)
+				image = Models.tensors_to_image(rgb_padded.data, alpha3_padded.data, rgb_padded.dims[3], rgb_padded.dims[2])
+			} else {
+				const [rgb] = Models.image_to_tensors(image.data, image.width, image.height)
+				const rgb_padded = await utils.pad(rgb, params.padding)
+				image = Models.tensors_to_image(rgb_padded.data, null, rgb_padded.dims[3], rgb_padded.dims[2])
+			}
+
+			const input_canvas = new OffscreenCanvas(image.width, image.height)
+			const input_ctx = input_canvas.getContext('2d', {willReadFrequently: true})!
+			input_ctx.putImageData(image, 0, 0)
+
+			const output_canvas = new OffscreenCanvas(Number(params.output_width), Number(params.output_height))
+			const output_ctx = output_canvas.getContext('2d', {willReadFrequently: true})!
+
+			const color_blender = await blender_factory.produce(params),
+			      alpha_blender = await blender_factory.produce(params)
+
+			const tiles = []
+			for (let row = 0n; row < params.num_h_blocks; row++) {
+				for (let col = 0n; col < params.num_w_blocks; col++) {
+					tiles.push([row, col] as const)
+				}
+			}
+
+			return new TileMapper(utils, session_cache, params, input_canvas, input_ctx, output_canvas, output_ctx, color_blender, alpha_blender, tiles)
+		}
+	}
+
+	private constructor(
+		private readonly utils: UtilityModels,
+		private readonly session_cache: SessionCache,
+		private readonly params: TilingParameters,
+		private readonly input_canvas: OffscreenCanvas,
+		private readonly input_ctx: OffscreenCanvasRenderingContext2D,
+		private readonly output_canvas: OffscreenCanvas,
+		private readonly output_ctx: OffscreenCanvasRenderingContext2D,
+		private readonly color_blender: SeamBlender,
+		private readonly alpha_blender: SeamBlender,
+		private readonly unmapped_tiles: (readonly [bigint, bigint])[]
+	) {
+		this.image_data_array = new Uint8ClampedArray(Number(this.params.output_tile_size) ** 2 * 4)
+		this.image_data = new ImageData(this.image_data_array, Number(this.params.output_tile_size), Number(this.params.output_tile_size))
+	}
+
+	private readonly image_to_tiles: WeakMap<ImageData, readonly [bigint, bigint]> = new WeakMap()
+	private readonly mapped_tiles: {[K: number]: boolean} = []
+
+	private readonly image_data_array: Uint8ClampedArray
+	private readonly image_data: ImageData
+
+	public get_utils() {
+		return this.utils
+	}
+
+	public get_session_cache() {
+		return this.session_cache
+	}
+
+	public get_parameters() {
+		return this.params
+	}
+
+	public tiles_remaining() {
+		return this.unmapped_tiles.length
+	}
+
+	private obtain_tile_image(row: bigint, col: bigint) {
+		const {in_x, in_y, in_w, in_h} = this.params.get_tile_params(row, col)
+		const image = this.input_ctx.getImageData(Number(in_x), Number(in_y), Number(in_w), Number(in_h))
+		this.image_to_tiles.set(image, [row, col] as const)
+		return image
+	}
+
+	public take_next() {
+		const tile = this.unmapped_tiles.shift() ?? null
+		return tile ? this.obtain_tile_image(...tile) : null
+	}
+
+	public take_random() {
+		const tile = this.unmapped_tiles.splice(Math.floor(Math.random() * this.unmapped_tiles.length), 1).shift() ?? null
+		return tile ? this.obtain_tile_image(...tile) : null
+	}
+
+	public cancel_submission(tile: ImageData) {
+		const coords = this.image_to_tiles.get(tile)!
+		if (!this.image_to_tiles.delete(tile)) throw new TypeError('invalid tile submission')
+		this.unmapped_tiles.unshift(coords)
+	}
+
+	public cancel_all_submissions() {
+		const tiles = this.unmapped_tiles
+		tiles.splice(0, tiles.length)
+
+		const {num_h_blocks, num_w_blocks} = this.params
+		for (let row = 0n; row < num_h_blocks; row++) {
+			for (let col = 0n; col < num_w_blocks; col++) {
+				if (!this.mapped_tiles[Number(row * num_w_blocks + col)]) {
+					tiles.push([row, col] as const)
+				}
+			}
+		}
+	}
+
+	public submit_mapped_tile(tile: ImageData, color: ort.TypedTensor<'float32'>, alpha: ort.TypedTensor<'float32'> | null) {
+		const coords = this.image_to_tiles.get(tile)!
+		if (!this.image_to_tiles.delete(tile)) throw new TypeError('invalid tile submission')
+
+		const [row, col] = coords
+		const {out_x, out_y, out_w, out_h} = this.params.get_tile_params(row, col)
+
+		this.mapped_tiles[Number(row * this.params.num_w_blocks + col)] = true
+
+		color = this.color_blender.blend(color, col, row)
+		if (alpha) alpha = this.alpha_blender.blend(alpha, col, row)
+
+		Models.tensors_into_image_data(this.image_data_array, color.data, alpha?.data ?? null, Number(out_w), Number(out_h))
+		this.output_ctx.putImageData(this.image_data, Number(out_x), Number(out_y))
+	}
+
+	public get_output_image() {
+		return this.output_canvas.transferToImageBitmap()
+	}
+
+	public generate_output_blob() {
+		return this.output_canvas.convertToBlob()
+	}
 }
 
-const OnnxSessionsCache = {
-	sessions: {} as {[path: string]: ReturnType<typeof ort.InferenceSession.create>},
+class SolidColorTensor {
+	private readonly len: number
+	private readonly rgb: ort.TypedTensor<'float32'>
+	private readonly alpha3: ort.TypedTensor<'float32'>
 
-	async get_or_create(path: string) {
-		return await (this.sessions[path] ?? (this.sessions[path] = ort.InferenceSession.create(path, {
-			executionProviders: ['wasm']
-		})))
-	},
+	public constructor(width: number, height: number) {
+		const len = this.len = width * height
+		this.rgb = new ort.Tensor('float32', new Float32Array(len * 3), [1, 3, height, width])
+		this.alpha3 = new ort.Tensor('float32', new Float32Array(len * 3), [1, 3, height, width])
+	}
 
-	get_or_create_helper(name: string) {
-		return this.get_or_create(Models.get_utility_path(name))
+	public color(r: number, g: number, b: number, a: number) {
+		const len = this.len
+		this.rgb.data.fill(r, 0, len)
+		this.rgb.data.fill(g, len, len * 2)
+		this.rgb.data.fill(b, len * 2, len * 3)
+		this.alpha3.data.fill(a)
+
+		return [this.rgb, this.alpha3] as const
 	}
 }
 
 const onnx_runner = {
 	stop_flag: false,
 	running: false,
-
-	to_input(image_data: Uint8ClampedArray, width: number, height: number, keep_alpha = false) {
-		const len = width * height
-		const rgb = new Float32Array(len * 3)
-		const alpha1 = new Float32Array(len)
-
-		for (let offset = 0; offset < len; offset += width) {
-			for (let x = 0; x < width; x++) {
-				const i = offset + x
-				const i4 = i * 4
-				rgb[i] = image_data[i4] / 255
-				rgb[i + len] = image_data[i4 + 1] / 255
-				rgb[i + len * 2] = image_data[i4 + 2] / 255
-				alpha1[i] = image_data[i4 + 3] / 255
-			}
-		}
-
-		if (keep_alpha) {
-			const alpha3 = new Float32Array(len * 3)
-			alpha3.set(alpha1)
-			alpha3.set(alpha1, len)
-			alpha3.set(alpha1, len * 2)
-
-			return [
-				new ort.Tensor('float32', rgb, [1, 3, height, width]),
-				new ort.Tensor('float32', alpha1, [1, 1, height, width]),
-				new ort.Tensor('float32', alpha3, [1, 3, height, width])
-			] as const
-		} else {
-			return [
-				new ort.Tensor('float32', rgb, [1, 3, height, width]),
-				null,
-				null
-			] as const
-		}
-	},
-
-	to_image_data(rgb_data: Float32Array, alpha3_data: Float32Array | null, width: number, height: number) {
-		const len = width * height
-		const image_data = new Uint8ClampedArray(len * 4)
-
-		for (let y = 0; y < height; y++) {
-			const offset = y * width
-
-			for (let x = 0; x < width; x++) {
-				const i = offset + x
-				const i4 = i * 4
-
-				image_data[i4] = rgb_data[i] * 255
-				image_data[i4 + 1] = rgb_data[i + len] * 255
-				image_data[i4 + 2] = rgb_data[i + len * 2] * 255
-				image_data[i4 + 3] = (alpha3_data ? (alpha3_data[i] + alpha3_data[i + len] + alpha3_data[i + len * 2]) / 3 : 1) * 255
-			}
-		}
-
-		return new ImageData(image_data, width, height)
-	},
 
 	is_solid_color(pixels: Uint8ClampedArray, keep_alpha = false) {
 		const a = pixels[3] / 255,
@@ -473,140 +739,70 @@ const onnx_runner = {
 
 		this.running = true
 
-		console.log(`tile size = ${settings.tile_size}`)
+		const tile_size = model_config.round_tile_size(settings.tile_size)
 
-		const output_ctx = output_canvas.getContext('2d', {willReadFrequently: true})!
-		output_canvas.width = Number(BigInt(image_data.width) * model_config.scale)
-		output_canvas.height = Number(BigInt(image_data.height) * model_config.scale)
+		const tile_mapper_factory = await TileMapper.Factory.initialize()
+		const tile_mapper = await tile_mapper_factory.create(tile_size, model_config.scale, model_config.offset, image_data, alpha_config !== null)
 
-		const model = await OnnxSessionsCache.get_or_create(model_config.path)
 		const has_alpha = alpha_config != null
-		const alpha_model = has_alpha ? await OnnxSessionsCache.get_or_create(alpha_config.path) : null
 
-		const params = new TilingParameters(BigInt(image_data.width), BigInt(image_data.height), model_config.scale, model_config.offset, settings.tile_size)
+		const session_cache = tile_mapper.get_session_cache()
+		const [model, alpha_model] = has_alpha
+			? await Promise.all([session_cache.get(model_config), session_cache.get(alpha_config)])
+			: [await session_cache.get(model_config), null]
 
-		const [blender, alpha_blender] = await Promise.all([SeamBlender.create(params), has_alpha ? SeamBlender.create(params) : null])
+		let {width, height} = tile_mapper.get_output_image()
+		output_canvas.width = width
+		output_canvas.height = height
+		let output_ctx = output_canvas.getContext('bitmaprenderer')!
 
-		const [rgb, alpha1, alpha3] = this.to_input(image_data.data, image_data.width, image_data.height, has_alpha)
-		const {padding} = params
+		block_callback(0, Number(tile_mapper.tiles_remaining()), true)
 
-		// noinspection ES6MissingAwait
-		const alpha3_padded = alpha3 ? await this.padding(alpha3, padding) : null
-		const rgb_padded = await this.padding(alpha1 ? await this.alpha_border_padding(rgb, alpha1, model_config.offset) : rgb, padding)
+		const utils = tile_mapper.get_utils()
+		const output_tile_size = Number(tile_size * model_config.scale - model_config.offset * 2n)
+		const solid_color = new SolidColorTensor(output_tile_size, output_tile_size)
 
-		const [, , h_padded, w_padded] = rgb_padded.dims
-		const input_canvas = document.createElement('canvas')
-		const input_ctx = input_canvas.getContext('2d', {willReadFrequently: true})!
-		input_canvas.width = w_padded
-		input_canvas.height = h_padded
-		input_ctx.putImageData(this.to_image_data(rgb_padded.data, alpha3_padded?.data ?? null, w_padded, h_padded), 0, 0)
-
-		const all_blocks = params.num_w_blocks * params.num_h_blocks
-		let progress = 0
-
-		console.time('render')
-
-		const tiles = []
-		for (let row = 0n; row < params.num_h_blocks; row++) {
-			for (let col = 0n; col < params.num_w_blocks; col++) {
-				tiles.push([row, col] as const)
-			}
+		// noinspection JSAssignmentUsedAsCondition
+		for (let tile_image; tile_image = tile_mapper.take_next();) {
+			const color = this.is_solid_color(tile_image.data, has_alpha)
+			if (color) tile_mapper.submit_mapped_tile(tile_image, ...solid_color.color(...color))
 		}
 
-		block_callback(0, Number(all_blocks), true)
+		tile_mapper.cancel_all_submissions()
 
-		while (tiles.length > 0) {
-			let tile: ort.TypedTensor<'float32'>,
-			    tile_alpha: ort.TypedTensor<'float32'> | null
+		const total_tiles = tile_mapper.tiles_remaining()
+		let tiles_completed = 0
 
-			const [[row, col]] = tiles.splice(settings.tile_random ? Math.floor(Math.random() * tiles.length) : 0, 1)
-			const tile_params = params.get_tile_params(row, col)
-			const tile_image_data = input_ctx.getImageData(Number(tile_params.in_x), Number(tile_params.in_y), Number(tile_params.in_w), Number(tile_params.in_h))
-			const single_color = this.is_solid_color(tile_image_data.data, has_alpha)
+		block_callback(0, Number(total_tiles), true)
 
-			if (single_color) {
-				[tile, tile_alpha] = this.create_solid_color_tensor(single_color, Number(settings.tile_size * model_config.scale - model_config.offset * 2n))
-			} else {
-				[tile, , tile_alpha] = this.to_input(tile_image_data.data, tile_image_data.width, tile_image_data.height, has_alpha)
+		// noinspection JSAssignmentUsedAsCondition
+		for (let tile_image; tile_image = settings.tile_random ? tile_mapper.take_random() : tile_mapper.take_next();) {
+			let [tile, , tile_alpha] = Models.image_to_tensors(tile_image.data, tile_image.width, tile_image.height, has_alpha)
 
-				// noinspection ES6MissingAwait
-				const tile_alpha_promise = alpha_model && tile_alpha ? alpha_model.run({x: tile_alpha}) : null
+			if (settings.tta_level > 0) tile = await utils.tta_split(tile, settings.tta_level)
 
-				if (settings.tta_level > 0) {
-					tile = await this.tta_split(tile, BigInt(settings.tta_level))
-				}
+			const alpha_output = alpha_model && tile_alpha ? alpha_model.run({x: tile_alpha}) : null
+			const output = await model.run({x: tile})
+			tile = output.y as ort.TypedTensor<'float32'>
+			if (await alpha_output) tile_alpha = (await alpha_output!).y as ort.TypedTensor<'float32'>
 
-				tile = (await model.run({x: tile})).y as ort.TypedTensor<'float32'>
+			if (settings.tta_level > 0) tile = await utils.tta_merge(tile, settings.tta_level)
 
-				if (settings.tta_level > 0) {
-					tile = await this.tta_merge(tile, BigInt(settings.tta_level))
-				}
+			tile_mapper.submit_mapped_tile(tile_image, tile, tile_alpha)
+			output_ctx.transferFromImageBitmap(await createImageBitmap(await tile_mapper.generate_output_blob()))
 
-				tile_alpha = ((await tile_alpha_promise)?.y ?? null) as ort.TypedTensor<'float32'> | null
-			}
-
-			const rgb = blender.blend(tile, tile_params.col, tile_params.row)
-			const alpha = alpha_blender && tile_alpha ? alpha_blender.blend(tile_alpha, tile_params.col, tile_params.row) : null
-			const output_image_data = this.to_image_data(rgb.data, alpha?.data ?? null, tile.dims[3], tile.dims[2])
-
-			output_ctx.putImageData(output_image_data, Number(tile_params.out_x), Number(tile_params.out_y))
-			progress++
+			tiles_completed++
 
 			if (this.stop_flag) {
-				block_callback(progress, Number(all_blocks), false)
+				block_callback(tiles_completed, Number(total_tiles), false)
 				this.running = false
-				console.timeEnd('render')
 				return
 			} else {
-				block_callback(progress, Number(all_blocks), true)
+				block_callback(tiles_completed, Number(total_tiles), true)
 			}
 		}
 
-		console.timeEnd('render')
 		this.running = false
-	},
-
-	async padding(rgb: ort.TypedTensor<'float32'>, padding: Padding) {
-		const model = await OnnxSessionsCache.get_or_create_helper('pad')
-		const [left, right, top, bottom] = [padding.left, padding.right, padding.top, padding.bottom]
-			.map(amount => new ort.Tensor('int64', BigInt64Array.from([amount]), []))
-		return (await model.run({x: rgb, left, right, top, bottom})).y as ort.TypedTensor<'float32'>
-	},
-
-	async tta_split(rgb: ort.TypedTensor<'float32'>, tta_level: bigint) {
-		const model = await OnnxSessionsCache.get_or_create_helper('tta_split')
-
-		return (await model.run({
-			x: rgb,
-			tta_level: new ort.Tensor('int64', BigInt64Array.from([tta_level]), [])
-		})).y as ort.TypedTensor<'float32'>
-	},
-
-	async tta_merge(rgb: ort.TypedTensor<'float32'>, tta_level: bigint) {
-		const model = await OnnxSessionsCache.get_or_create_helper('tta_merge')
-
-		return (await model.run({
-			x: rgb,
-			tta_level: new ort.Tensor('int64', BigInt64Array.from([tta_level]), [])
-		})).y as ort.TypedTensor<'float32'>
-	},
-
-	async alpha_border_padding(rgb: ort.TypedTensor<'float32'>, alpha: ort.TypedTensor<'float32'>, offset: bigint) {
-		const model = await OnnxSessionsCache.get_or_create_helper('alpha_border_padding')
-
-		const out = await model.run({
-			rgb: new ort.Tensor('float32', rgb.data, rgb.dims.slice(1)),
-			alpha: new ort.Tensor('float32', alpha.data, alpha.dims.slice(1)),
-			offset: new ort.Tensor('int64', BigInt64Array.from([offset]), [])
-		})
-
-		const out_rgb = out.y as ort.TypedTensor<'float32'>
-		return new ort.Tensor('float32', out_rgb.data, [1, ...out_rgb.dims])
-	},
-
-	async antialias(rgb: ort.TypedTensor<'float32'>) {
-		const ses = await OnnxSessionsCache.get_or_create_helper('antialias')
-		return (await ses.run({x: rgb})).y as ort.TypedTensor<'float32'>
 	}
 }
 
@@ -835,7 +1031,7 @@ function onLoaded() {
 			}
 		}
 
-		const config = Models.get_parameters(arch, style, method)
+		const config = Models.get_model(arch, style, method)
 
 		if (config == null) {
 			set_message('(・A・) Model Not found!')
@@ -844,7 +1040,7 @@ function onLoaded() {
 
 		const image_data = src_ctx.getImageData(0, 0, src.width, src.height)
 		const has_alpha = !settings.detect_alpha ? false : onnx_runner.has_transparency(image_data.data)
-		const alpha_config = has_alpha ? Models.get_parameters(arch, style, /scale\d+x/.exec(method)?.[0] ?? 'scale1x') : null
+		const alpha_config = has_alpha ? Models.get_model(arch, style, /scale\d+x/.exec(method)?.[0] ?? 'scale1x') : null
 
 		if (has_alpha && !alpha_config) {
 			set_message('(・A・) Alpha Model Not found!')
@@ -857,12 +1053,10 @@ function onLoaded() {
 		dest.style.height = 'auto'
 		loop_btn.disabled = true
 
-		const tile_size = config.round_tile_size(settings.tile_size)
-
 		const formatTime = (secs: number) => `${Math.floor(secs / 60).toString(10).padStart(2, '0')}:${Math.floor(secs % 60).toString(10).padStart(2, '0')}`
 		const start = performance.now()
 
-		await onnx_runner.tiled_render(image_data, config, alpha_config, {...settings, tile_size}, dest, (progress, max_progress, processing) => {
+		await onnx_runner.tiled_render(image_data, config, alpha_config, settings, dest, (progress, max_progress, processing) => {
 			const now = performance.now()
 			const spent = (now - start) / 1000
 			const eta = (max_progress - progress) / progress * spent

@@ -3,6 +3,7 @@
 		"module": "ES2022",
 		"target": "ES2022",
 		"lib": ["ES2022", "DOM"],
+		"typeRoots": ["@types"],
 		"sourceMap": true,
 		"baseUrl": ".",
 		"paths": {
