@@ -640,6 +640,7 @@ class TileMapper {
 
 		Models.tensors_into_image_data(this.image_data_array, color.data, alpha?.data ?? null, Number(out_w), Number(out_h))
 		this.output_ctx.putImageData(this.image_data, Number(out_x), Number(out_y))
+		return [out_x, out_y, out_w, out_h] as const
 	}
 
 	public get_output_canvas() {
@@ -732,8 +733,16 @@ const onnx_runner = {
 			const tile_mapper_output = tile_mapper.get_output_canvas()
 			output_canvas.width = tile_mapper_output.width
 			output_canvas.height = tile_mapper_output.height
+
+			const dirty_regions: ReturnType<typeof tile_mapper.submit_mapped_tile>[] = []
 			const output_ctx = output_canvas.getContext('2d')!
-			output_ctx.drawImage(tile_mapper_output, 0, 0)
+
+			const update_output_canvas = () => {
+				for (const region of dirty_regions.splice(0)) {
+					const [x, y, w, h] = region.map(Number)
+					output_ctx.drawImage(tile_mapper_output, x, y, w, h, x, y, w, h)
+				}
+			}
 
 			const output_tile_size = Number(tile_size * model_config.scale - model_config.offset * 2n)
 			const solid_color = new SolidColorTensor(output_tile_size, output_tile_size)
@@ -741,18 +750,19 @@ const onnx_runner = {
 			// noinspection JSAssignmentUsedAsCondition
 			for (let tile_image; tile_image = tile_mapper.take_next();) {
 				const color = this.is_solid_color(tile_image.data, has_alpha)
-				if (color) tile_mapper.submit_mapped_tile(tile_image, ...solid_color.color(...color))
+				if (color) dirty_regions.push(tile_mapper.submit_mapped_tile(tile_image, ...solid_color.color(...color)))
 			}
 
 			tile_mapper.cancel_all_submissions()
+			update_output_canvas()
 
 			let next_update = performance.now() + 100
 			let animation_frame = null
 
 			const update_during_animation_frame = () => {
 				const now = performance.now()
-				if (now >= next_update) {
-					output_ctx.drawImage(tile_mapper_output, 0, 0)
+				if (now >= next_update && dirty_regions.length > 0) {
+					update_output_canvas()
 					const now2 = performance.now()
 					next_update = now2 + Math.max((now2 - now) * 9, 150)
 				}
@@ -796,13 +806,12 @@ const onnx_runner = {
 
 					if (settings.tta_level > 0) tile = await utils.tta_merge(tile, settings.tta_level)
 
-					tile_mapper.submit_mapped_tile(tile_image, tile, tile_alpha)
+					dirty_regions.push(tile_mapper.submit_mapped_tile(tile_image, tile, tile_alpha))
 				}
 			} finally {
 				cancelAnimationFrame(animation_frame)
+				update_output_canvas()
 			}
-
-			output_ctx.drawImage(tile_mapper_output, 0, 0)
 		} finally {
 			this.running = false
 		}
