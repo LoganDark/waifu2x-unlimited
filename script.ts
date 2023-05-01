@@ -898,29 +898,22 @@ function onLoaded() {
 	const stop_btn = document.getElementById('stop') as HTMLButtonElement
 	const loop_btn = document.getElementById('loop_btn') as HTMLButtonElement
 
-	function set_input_image(file: File) {
+	async function set_input_image(file: File) {
 		const feedbackWasDisabled = loop_btn.disabled
-		const reader = new FileReader()
-
-		reader.addEventListener('load', () => {
-			const img = new Image()
-			img.src = reader.result as string
-			img.addEventListener('load', () => {
-				src.width = img.naturalWidth
-				src.height = img.naturalHeight
-				src_ctx.drawImage(img, 0, 0)
-				src.style.height = '128px'
-				src.style.width = 'auto'
-				filename = file.name
-
-				start_btn.disabled = false
-				loop_btn.disabled = feedbackWasDisabled
-			})
-		})
 
 		start_btn.disabled = true
 		loop_btn.disabled = true
-		reader.readAsDataURL(file)
+
+		const bitmap = await createImageBitmap(file)
+		src.width = bitmap.width
+		src.height = bitmap.height
+		src_ctx.drawImage(bitmap, 0, 0)
+		src.style.height = '128px'
+		src.style.width = 'auto'
+		filename = file.name
+
+		start_btn.disabled = false
+		loop_btn.disabled = feedbackWasDisabled
 	}
 
 	function clear_input_image() {
