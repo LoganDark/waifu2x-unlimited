@@ -1,13 +1,13 @@
 interface ModelConfig {
 	scale: bigint
 	offset: bigint
-	path: string
+	path?: string
 
 	round_tile_size(this: ModelConfig, tile_size: bigint): bigint
 }
 
 interface ModelMethods {
-	[method: string]: Omit<ModelConfig, 'path'> & Partial<Pick<ModelConfig, 'path'>>
+	[method: string]: ModelConfig
 }
 
 interface ModelStyles {
@@ -124,12 +124,12 @@ const Models = {
 		return models
 	})(),
 
-	get_model(arch: string, style: string, method: string): ModelConfig | null {
+	get_model(arch: string, style: string, method: string) {
 		const config = this.models[arch]?.[style]?.[method] ?? null
 
 		if (config !== null) {
 			config.path = `models/${arch}/${style}/${method}.onnx`
-			return config as ModelConfig
+			return config as Required<ModelConfig>
 		}
 
 		return null
@@ -298,11 +298,11 @@ class UtilityModels {
 }
 
 class SessionCache {
-	private cache: Map<ModelConfig | string, Promise<ort.InferenceSession>> = new Map()
+	private cache: Map<Required<ModelConfig> | string, Promise<ort.InferenceSession>> = new Map()
 
 	public constructor() {}
 
-	public get(specifier: ModelConfig | string) {
+	public get(specifier: Required<ModelConfig> | string) {
 		const cache = this.cache
 		const existing = cache.get(specifier)
 
@@ -315,7 +315,7 @@ class SessionCache {
 		return existing
 	}
 
-	public delete(config: ModelConfig) {
+	public delete(config: Required<ModelConfig>) {
 		this.cache.delete(config)
 	}
 }
@@ -708,8 +708,8 @@ const onnx_runner = {
 	async tiled_render(
 		session_cache: SessionCache,
 		image_data: ImageData,
-		model_config: ModelConfig,
-		alpha_config: ModelConfig | null,
+		model_config: Required<ModelConfig>,
+		alpha_config: Required<ModelConfig> | null,
 		settings: SettingsSnapshot,
 		output_canvas: HTMLCanvasElement
 	) {
