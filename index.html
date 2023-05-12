@@ -1,135 +1,123 @@
 <!DOCTYPE html>
 <html lang="en-US">
-  <head>
-    <meta charset="utf-8">
-    <meta name="google" content="notranslate">
-    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, user-scalable=yes">
-    <link rel="icon" href="favicon.ico">
-    <title>unlimited:waifu2x</title>
-    <script src="ort/ort.min.js"></script>
-    <script src="script.js" charset="utf-8"></script>
-    <link href="style.css" rel="stylesheet" type="text/css">
-  </head>
-  <body>
-    <h1>unlimited:waifu2x</h1>
-    <div style="font-size: 0.8em; text-align: center; margin: 0 auto;">
-      <div>An experimental in-browser version of waifu2x.</div>
-      <div class="comment" style="font-size: 1em">2023-04-07: Update photo models; Ctrl+F5 to reload</div>
-      <div class="comment" style="font-size: 1em">2023-03-29: Add new photo models; Drag and drop support for image files</div>
-    </div>
-    <div id="main-panel">
-      <div id="src-box">
-        <canvas id="src" width=128 height=128></canvas>
-      </div>
-      <form id="form-box">
-        <table>
-          <tr>
-            <td>File</td>
-            <td>
-              <input type="file" id="file" name="file" accept="image/*">
-            </td>
-          </tr>
-          <tr>
-            <td>Model</td>
-            <td>
-              <select name="model">
-                <option value="swin_unet.art" selected>🎨 swin_unet / art</option>
-                <option value="swin_unet.photo">📷 swin_unet / photo</option>
-                <option value="cunet.art">🎨 cunet / art (201811)</option>
-              </select>
-            </td>
-          </tr>
-          <tr>
-            <td>DeNoise</td>
-            <td>
-              <select name="noise_level">
-                <option value="-1">(-) None</option>
-                <option value="0" selected>(0) Low</option>
-                <option value="1">(1) Medium</option>
-                <option value="2">(2) High</option>
-                <option value="3">(3) Highest</option>
-              </select>
-                <label>
-                  <input type="checkbox" name="noise_antialias">
-                  Antialias
-                </label>
-            </td>
-          </tr>
-          <tr>
-            <td>Upscaling</td>
-            <td>
-              <select name="scale">
-                <option value="1">1x</option>
-                <option value="2" name="scale_2x" selected>2x</option>
-                <option value="4" name="scale_4x">4x</option>
-              </select>
-              <span id="scale-comment" class="comment">no 4x support</span>
-            </td>
-          </tr>
-          <tr>
-            <td>Tile</td>
-            <td>
-              <div>
-                <select name="tile_size">
-                  <option value="64" selected>64</option>
-                  <option value="256">256</option>
-                  <option value="400">400</option>
-                  <option value="640">640</option>
-                </select>
-                <label>
-                  <input type="checkbox" name="tile_random">
-                  Shuffle
-                </label>
-              </div>
-              <span id="tile-comment" class="comment">256 is recommended</span>
-            </td>
-          </tr>
-          <tr>
-            <td>TTA</td>
-            <td>
-              <select name="tta">
-                <option value="0" selected>0</option>
-                <option value="2">2</option>
-                <option value="4">4</option>
-              </select>
-              Ensemble
-            </td>
-          </tr>
-          <tr>
-            <td>Alpha Channel</td>
-            <td>
-              <select name="alpha">
-                <option value="1">Auto</option>
-                <option value="0" selected>Disable</option>
-              </select>
-            </td>
-          </tr>
-          <tr>
-            <td colspan="2">
-              <div id="button-box">
-                <input type="button" id="start" value="Start">
-                <input type="button" id="stop" value="Stop">
-                <input type="button" id="loop_btn" value="Loop" title="Put the output image back into the input" disabled>
-              </div>
-            </td>
-          </tr>
-        </table>
-      </form>
-      <div id="message">
-        ( ・∀・)
-      </div>
-      <div id="dest-box">
-        <canvas id="dest" style="width: 60%; height: auto"></canvas>
-      </div>
-    </div>
-    <div id="footer">
-      <div>
-        <a href="https://unlimited.waifu2x.net/">The website</a> is under construction.
-      </div>
-      <div>
-        Powered by <a href="https://github.com/nagadomi/nunif">nunif/waifu2x</a>, <a href="https://waifu2x.udp.jp/">waifu2x.udp.jp</a>
-      </div>
-      Slightly tweaked by <a href="https://cohost.org/LoganDark">LoganDark</a> and <a href="https://cohost.org/EmilyTheFlareon">Emily the Flareon</a>
-    </div>
-  </body>
+	<head>
+		<meta charset="utf-8">
+		<meta name="color-scheme" content="dark light">
+		<meta name="google" content="notranslate">
+		<meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, user-scalable=yes">
+		<link rel="icon" href="favicon.ico">
+		<title>unlimited:waifu2x</title>
+		<script src="ort/ort.wasm.min.js" defer></script>
+		<script src="script.js" defer></script>
+		<link href="style.css" rel="stylesheet" type="text/css">
+	</head>
+	<body>
+		<header>
+			<h1>unlimited:waifu2x</h1>
+			<p class="subtitle">An experimental in-browser version of waifu2x.</p>
+			<p class="note">2023-05-04: Add new art_scan models for manga, anime screencaps; Ctrl+F5 to reload</p>
+			<p class="note">2023-04-07: Update photo models; Ctrl+F5 to reload</p>
+			<p class="note">2023-03-29: Add new photo models; Drag and drop support for image files</p>
+		</header>
+		<main>
+			<canvas id="input-canvas" width="0" height="0"></canvas>
+			<form id="form" action="javascript:">
+				<table>
+					<tr>
+						<td><label for="input-file">Input</label></td>
+						<td><input type="file" accept="image/*" id="input-file" disabled></td>
+					</tr>
+					<tr>
+						<td></td>
+						<td class="hint">...or drag and drop<br />...or paste from clipboard</td>
+					</tr>
+					<tr>
+						<td><label for="select-model">Model</label></td>
+						<td><select id="select-model" disabled>
+							<option value="swin_unet.art">🎨 swin_unet / art</option>
+							<option value="swin_unet.art_scan">🖨 swin_unet / art scan</option>
+							<option value="swin_unet.photo">📷 swin_unet / photo</option>
+							<option value="cunet.art" selected>🎨 cunet / art (201811)</option>
+						</select></td>
+					</tr>
+					<tr>
+						<td><label for="select-noise-level">Denoise</label></td>
+						<td><select id="select-noise-level" disabled>
+							<option value="-1">(-) None</option>
+							<option value="0">(0) Low</option>
+							<option value="1">(1) Medium</option>
+							<option value="2">(2) High</option>
+							<option value="3" selected>(3) Highest</option>
+						</select>
+							<label><input type="checkbox" id="enable-antialias" disabled> Antialias</label>
+						</td>
+					</tr>
+					<tr>
+						<td><label for="select-scale">Scale</label></td>
+						<td><select id="select-scale" disabled>
+							<option value="1">1x</option>
+							<option value="2" selected>2x</option>
+							<option value="4">4x</option>
+						</select>
+							<span id="scale-comment" class="comment hidden">no 4x support</span>
+						</td>
+					</tr>
+					<tr>
+						<td><label for="tile-size">Tile Size</label></td>
+						<td><input type="number" id="tile-size" list="tile-sizes" value="64" disabled>
+							<datalist id="tile-sizes">
+								<option value="64">64</option>
+								<option value="256">256</option>
+								<option value="400">400</option>
+								<option value="640">640</option>
+							</datalist>
+							<br />
+							<span id="tile-size-comment" class="comment hidden">256 is recommended</span>
+						</td>
+					</tr>
+					<tr>
+						<td>Tile Order</td>
+						<td>
+							<label><input type="checkbox" id="tile-random" disabled> Random</label>
+							<br />
+							<label><input type="checkbox" id="tile-focus" checked disabled> Cursor Focus</label>
+						</td>
+					</tr>
+					<tr>
+						<td><label for="select-tta-level">TTA</label></td>
+						<td><select id="select-tta-level" disabled>
+							<option value="0" selected>0</option>
+							<option value="2">2</option>
+							<option value="4">4</option>
+						</select></td>
+					</tr>
+					<tr>
+						<td><label for="alpha-channel">Alpha Channel</label></td>
+						<td><input type="checkbox" id="alpha-channel" disabled></td>
+					</tr>
+					<tr>
+						<td colspan="2">
+							<div class="buttons">
+								<button type="submit" id="start-button" disabled>Start</button>
+								<button type="button" id="stop-button" disabled>Stop</button>
+							</div>
+						</td>
+					</tr>
+					<tr>
+						<td><label for="alpha-threshold">Alpha Threshold</label></td>
+						<td><input type="number" step="0.01" id="alpha-threshold" value="0.5" disabled></td>
+					</tr>
+				</table>
+			</form>
+			<div id="message">( ・∀・)</div>
+			<canvas id="output-canvas" width="0" height="0" class="expanded"></canvas>
+		</main>
+		<footer>
+			<p><a href="https://unlimited.waifu2x.net/">The website</a> is under construction.</p>
+			<p>Powered by <a href="https://github.com/nagadomi/nunif">nunif/waifu2x</a>,
+				<a href="https://waifu2x.udp.jp/">waifu2x.udp.jp</a></p>
+			<p>Rewritten by <a href="https://cohost.org/LoganDark">LoganDark</a> and
+				<a href="https://cohost.org/EmilyTheFlareon">Emily the Flareon</a></p>
+		</footer>
+	</body>
 </html>
