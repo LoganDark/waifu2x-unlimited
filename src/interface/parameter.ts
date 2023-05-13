@@ -2,8 +2,11 @@
 
 namespace UserInterface {
 	export abstract class Parameter<T, E extends HTMLElement> {
+		protected _defaultValue: T
+
 		protected constructor(public element: E, protected _onValueChanged: (newValue: T) => void = () => {}) {
 			[this._fireValueChanged, this.getNextValue] = createSignal()
+			this._defaultValue = this._getValue()
 		}
 
 		protected _init() {
@@ -178,12 +181,10 @@ namespace UserInterface {
 			}
 
 			protected _getSavedValue(): number | null {
-				try {
-					const stored = localStorage.getItem(this.key)
-					return Number(BigInt(stored ?? '!'))
-				} catch {}
-
-				return null
+				const stored = localStorage.getItem(this.key)
+				const value = Number(stored ?? '!')
+				if (!Number.isInteger(value)) return null
+				return value
 			}
 
 			protected _setSavedValue(newValue: number) {
@@ -193,11 +194,14 @@ namespace UserInterface {
 			}
 
 			protected _getValue(): number {
-				try {
-					return Number(BigInt(this.element.value))
-				} catch {
-					return 0
+				const value = Number(this.element.value)
+
+				if (!Number.isInteger(value)) {
+					this._setValue(this._defaultValue)
+					return this._defaultValue
 				}
+
+				return value
 			}
 
 			protected _setValue(newValue: number): boolean {
@@ -227,7 +231,7 @@ namespace UserInterface {
 			protected _getSavedValue(): number | null {
 				const stored = localStorage.getItem(this.key)
 				const value = Number(stored ?? '!')
-				if (Number.isNaN(value)) return null
+				if (!Number.isFinite(value)) return null
 				return value
 			}
 
@@ -238,11 +242,14 @@ namespace UserInterface {
 			}
 
 			protected _getValue(): number {
-				try {
-					return Number(this.element.value)
-				} catch {
-					return 0
+				const value = Number(this.element.value)
+
+				if (!Number.isFinite(value)) {
+					this._setValue(this._defaultValue)
+					return this._defaultValue
 				}
+
+				return value
 			}
 
 			protected _setValue(newValue: number): boolean {
