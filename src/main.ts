@@ -10,7 +10,8 @@
 	ort.env.wasm.simd = true
 	ort.env.wasm.proxy = true
 
-	{ const _ = UserInterface.setMessageWorking('Loading utility models') }
+	// noinspection ES6MissingAwait
+	UserInterface.setMessageWorking('Loading utility models')
 
 	const utils = await Utils.load()
 
