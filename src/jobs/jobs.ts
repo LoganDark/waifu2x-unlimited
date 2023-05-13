@@ -209,6 +209,7 @@ namespace Jobs {
 				scale,
 				tileSize,
 				alphaChannel,
+				backgroundColor: [bgR, bgG, bgB],
 				alphaThreshold,
 				model,
 				model: {context},
@@ -392,7 +393,7 @@ namespace Jobs {
 				timer.pop()
 			} else {
 				timer.push('toRgb')
-				let rgb = Convert.toRgb(capture)
+				let rgb = Convert.toRgb(capture, bgR, bgG, bgB)
 
 				timer.transition('pad')
 				rgb = await wrap(utils.pad(rgb, metrics.tilePadding))

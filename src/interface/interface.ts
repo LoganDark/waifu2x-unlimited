@@ -18,7 +18,8 @@ namespace UserInterface {
 		tileRandom: new Parameter.Checkbox(document.getElementById('tile-random') as HTMLInputElement, 'settings.tileRandom'),
 		tileFocus: new Parameter.Checkbox(document.getElementById('tile-focus') as HTMLInputElement, 'settings.tileFocus'),
 		ttaLevel: new Parameter.TtaLevelSelect(document.getElementById('select-tta-level') as HTMLSelectElement, 'settings.ttaLevel'),
-		alphaChannel: new Parameter.Checkbox(document.getElementById('alpha-channel') as HTMLInputElement, 'settings.alphaChannel'),
+		alphaChannel: new Parameter.Checkbox(document.getElementById('alpha-channel') as HTMLInputElement, 'settings.alphaChannel', update),
+		backgroundColor: new Parameter.ColorInput(document.getElementById('background-color') as HTMLInputElement, 'settings.backgroundColor'),
 		alphaThreshold: new Parameter.NumberInput(document.getElementById('alpha-threshold') as HTMLInputElement, 'settings.alphaThreshold')
 	}))
 
@@ -34,6 +35,7 @@ namespace UserInterface {
 		scale: number
 		tileSize: number
 		alphaChannel: boolean
+		backgroundColor: readonly [number, number, number]
 		alphaThreshold: number
 
 		model: Model
@@ -98,10 +100,13 @@ namespace UserInterface {
 			parameters.tileSize,
 			parameters.ttaLevel,
 			parameters.alphaChannel,
+			parameters.backgroundColor,
 			parameters.alphaThreshold
 		] as Parameter.Disableable[]) {
 			initParam.disabled = !initParamsTweakable()
 		}
+
+		parameters.backgroundColor.disabled ||= parameters.alphaChannel.value
 
 		for (const liveParam of [parameters.tileRandom, parameters.tileFocus]) {
 			liveParam.disabled = !liveParamsTweakable()
@@ -257,12 +262,14 @@ namespace UserInterface {
 			outputBitmap = null
 
 			const params = await _parameters
+			const backgroundColor = params.backgroundColor.value
 			const initParams: InitParameters = {
 				image: inputBitmap,
 				output: await _outputCanvas,
 				scale: params.scale.value,
 				tileSize: params.tileSize.value,
 				alphaChannel: params.alphaChannel.value,
+				backgroundColor: [(backgroundColor >> 16) / 255, (backgroundColor >> 8 & 0xFF) / 255, (backgroundColor & 0xFF) / 255],
 				alphaThreshold: params.alphaThreshold.value,
 				model: await getSelectedModel(),
 				antialias: params.enableAntialias.value,

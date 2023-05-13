@@ -308,5 +308,53 @@ namespace UserInterface {
 				return value.toString()
 			}
 		}
+
+		export class ColorInput extends Parameter<number, HTMLInputElement> implements Disableable {
+			public constructor(input: HTMLInputElement, private key: string, _onValueChanged?: (newValue: number) => void) {
+				if (input.type !== 'color') throw new TypeError('expected color input')
+				super(input, _onValueChanged)
+				input.addEventListener('change', () => this.update())
+				this._init()
+			}
+
+			protected _getSavedValue(): number | null {
+				const stored = localStorage.getItem(this.key)
+				const value = parseInt(stored?.match(/^#([0-9a-f]{6})$/i)?.[1] ?? '!', 16)
+				if (!Number.isFinite(value)) return null
+				return value
+			}
+
+			protected _setSavedValue(newValue: number) {
+				try {
+					localStorage.setItem(this.key, `#${newValue.toString(16).padStart(6, '0')}`)
+				} catch {}
+			}
+
+			protected _getValue(): number {
+				const value = parseInt(this.element.value.match(/^#([0-9a-f]{6})$/i)?.[1] ?? '!', 16)
+
+				if (!Number.isFinite(value)) {
+					this._setValue(this._defaultValue)
+					return this._defaultValue
+				}
+
+				return value
+			}
+
+			protected _setValue(newValue: number): boolean {
+				const toSet = `#${newValue.toString(16).padStart(6, '0')}`
+
+				if (toSet.toLowerCase() !== this.element.value.toLowerCase()) {
+					this.element.value = toSet
+					return true
+				} else {
+					return false
+				}
+			}
+
+			public get disabled(): boolean { return this.element.disabled }
+
+			public set disabled(disabled: boolean) { this.element.disabled = disabled }
+		}
 	}
 }
