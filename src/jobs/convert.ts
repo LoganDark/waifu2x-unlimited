@@ -80,16 +80,42 @@ namespace Convert {
 		return new ort.Tensor('float32', alpha1, [1, 1, height, width]) as Bitmap1
 	}
 
+	const srgbToLinearLut = new Uint16Array(256)
+	const linearToSrgbLut = new Float32Array(4096)
+
+	for (let byte = 0, lastIdx = 0; byte < 256; byte++) {
+		const srgb = byte / 255
+		const linear = srgb > 0.0392857 ? Math.pow((srgb + 0.055) / 1.055, 2.4) : srgb / 12.9232102
+		linearToSrgbLut.fill(srgb, lastIdx, lastIdx = (srgbToLinearLut[byte] = (linear * 4095) >> 0) + 1)
+	}
+
+	// for (let srgb = 0; srgb < 256; srgb++) {
+	// 	const linear = srgbToLinearLut[srgb]
+	// 	const value = (linearToSrgbLut[linear] * 255) >> 0
+	// 	if (value !== srgb) throw new TypeError(`sRGB roundtrip fail: ${value} !== ${srgb} (= ${linear})`)
+	// }
+
 	export const toRgb = ({width, height, data}: ImageData, bgR = 1, bgG = 1, bgB = 1) => {
+		const bgRgb = new Uint16Array([
+			srgbToLinearLut[(bgR * 255) >> 0],
+			srgbToLinearLut[(bgG * 255) >> 0],
+			srgbToLinearLut[(bgB * 255) >> 0]
+		])
+
 		const pixels = width * height
 		const rgb = new Float32Array(pixels * 3)
 		const alpha = new Float32Array(pixels)
 
-		let a = 0, r = 0, g = pixels, b = pixels * 2
-		for (let i = 3; i < data.length; i += 4) alpha[a++] = data[i] / 255
-		for (let i = 0, a = 0; i < data.length; i += 4) rgb[r++] = bgR + (data[i] / 255 - bgR) * alpha[a++]
-		for (let i = 1, a = 0; i < data.length; i += 4) rgb[g++] = bgG + (data[i] / 255 - bgG) * alpha[a++]
-		for (let i = 2, a = 0; i < data.length; i += 4) rgb[b++] = bgB + (data[i] / 255 - bgB) * alpha[a++]
+		for (let i = 3, a = 0; i < data.length; i += 4) alpha[a++] = data[i] / 255
+
+		for (let channelIdx = 0; channelIdx < 3; channelIdx++) {
+			const bgLinear = bgRgb[channelIdx]
+			const channel = rgb.subarray(channelIdx * pixels)
+
+			for (let idx = channelIdx, out = 0; idx < data.length; idx += 4, out++) {
+				channel[out] = linearToSrgbLut[(bgLinear + (srgbToLinearLut[data[idx]] - bgLinear) * alpha[out]) >> 0]
+			}
+		}
 
 		return new ort.Tensor('float32', rgb, [1, 3, height, width]) as Bitmap3
 	}
