@@ -225,12 +225,10 @@ namespace UserInterface {
 			}
 
 			protected _getSavedValue(): number | null {
-				try {
-					const stored = localStorage.getItem(this.key)
-					return Number(stored ?? '!')
-				} catch {}
-
-				return null
+				const stored = localStorage.getItem(this.key)
+				const value = Number(stored ?? '!')
+				if (Number.isNaN(value)) return null
+				return value
 			}
 
 			protected _setSavedValue(newValue: number) {
