@@ -123,7 +123,7 @@ namespace Jobs {
 			console.info(`· Tile size: ${store.initParams.tileSize}`)
 			console.info(`· TTA level: ${store.initParams.ttaLevel}`)
 			console.info(`· Alpha: ${store.initParams.alphaChannel}`)
-			console.info(`· Threads: ${!!SharedArrayBuffer ? ort.env.wasm.numThreads : '1 (no SharedArrayBuffer)'}`)
+			console.info(`· Threads: ${!!window.SharedArrayBuffer ? ort.env.wasm.numThreads : '1 (no SharedArrayBuffer)'}`)
 			console.info('\n')
 			store.timer.printSummary()
 			console.info('―'.repeat(128))
