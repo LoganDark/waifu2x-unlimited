@@ -159,9 +159,14 @@ namespace UserInterface {
 	}
 
 	const getFileItem = (dt: DataTransfer) => {
-		const firstItem = dt.items[0]
-		if (!firstItem?.type?.startsWith('image/')) return null
-		return firstItem
+		const items = dt.items.length
+
+		for (let i = 0; i < items; i++) {
+			const item = dt.items[i]
+			if (item.type.startsWith('image/')) return item
+		}
+
+		return null
 	}
 
 	const getFile = (dt: DataTransfer) => getFileItem(dt)?.getAsFile() ?? null

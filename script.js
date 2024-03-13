@@ -676,10 +676,13 @@ var UserInterface;
         await UserInterface.setMessageFace('good');
     };
     const getFileItem = (dt) => {
-        const firstItem = dt.items[0];
-        if (!firstItem?.type?.startsWith('image/'))
-            return null;
-        return firstItem;
+        const items = dt.items.length;
+        for (let i = 0; i < items; i++) {
+            const item = dt.items[i];
+            if (item.type.startsWith('image/'))
+                return item;
+        }
+        return null;
     };
     const getFile = (dt) => getFileItem(dt)?.getAsFile() ?? null;
     document.addEventListener('paste', async (e) => {
